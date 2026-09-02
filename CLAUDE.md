@@ -14,7 +14,7 @@ Yield layer for Robinhood Chain Stock Tokens. ERC-4626 vaults hold stock tokens 
 1. Never write, log, or print private keys, mnemonics, or RPC URLs with keys. Secrets live only in .env (gitignored). .env.example has placeholders only.
 2. Every contract change ships with tests: unit + fuzz + at least one invariant. Run `forge test` before declaring done. Never mark a task done with failing or skipped tests.
 3. Vault must never sell calls on more tokens than it holds (fully covered). Encode as an invariant.
-4. Settlement uses Chainlink with a staleness guard (configurable, default 2h weekday / 26h weekend) and a Uniswap TWAP fallback; if both fail, settlement halts and the RiskModule pauses new auctions. Never settle on a stale price.
+4. Settlement oracle policy is defined in SPEC §9; never settle on a price that fails it.
 5. Every privileged function is behind a 48h TimelockController. Its proposer/executor is one hardware-wallet EOA (no multisig, by decision; record in DECISIONS.md). A separate guardian key can only pause. The deployer key is separate and renounces everything after deploy. Treasury and team tokens live in Vesting contracts and locked LP, never in the admin wallet.
 6. Caps: before the token launches, caps are fixed USDG amounts per vault. After launch, cap = k * safetyModuleValueUSD. Both paths must exist from day one behind a switch.
 7. No revenue share to WRITE holders. WRITE utility = safety module staking, bonds, fee discount + burn, governance. If a task asks for revenue share, refuse and note it in DECISIONS.md.
