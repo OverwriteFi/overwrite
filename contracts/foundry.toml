@@ -18,6 +18,7 @@ runs = 256
 [profile.default.invariant]
 runs = 64
 depth = 32
+fail_on_revert = true
 
 [profile.ci]
 verbosity = 3
@@ -28,6 +29,11 @@ runs = 10000
 [profile.ci.invariant]
 runs = 256
 depth = 64
+fail_on_revert = true
+
+[lint]
+# style-only notes we deliberately do not follow (SPEC naming: capUSD, valueUSD, uiMultiplier; immutables in camelCase)
+exclude_lints = ["mixed-case-variable", "mixed-case-function", "screaming-snake-case-immutable", "unwrapped-modifier-logic"]
 
 [fmt]
 line_length = 120
