@@ -174,3 +174,35 @@ Format: ID · date · decision · alternatives considered · why · sources. New
 **Why.** cast on 2026-09-02 showed testnet 46630 has no USDG, stock tokens, Chainlink stock feeds, Uniswap v3 factory or Morpho at the mainnet addresses (SPEC §1.8).
 
 **Consequences.** SPEC.md §1.8; `contracts/test/mocks/`.
+
+---
+
+## D-015 · 2026-09-02 · TWAPs are converted to USD with the USDG/USD feed; weekend path halts on a USDG depeg beyond ±2 %
+
+**Decision.** Every Uniswap TWAP the protocol uses (weekend primary, weekday fallback, reference spot, cap pricing) is multiplied by the USDG/USD Chainlink answer (`0x61B7e5650328764B076A108EFF5fa7282a1B9aD2`). If that answer is older than 26 h the TWAP is invalid and the series falls through to the next oracle path. If the answer is outside `[0.98, 1.02]` a weekend series is HALTED immediately with reason `USDG_DEPEG`, with no Chainlink fallback.
+
+**Alternatives considered.** Treating USDG at par (the v0.1 draft) — rejected: strikes and Chainlink answers are in USD, so a USDG discount would systematically overstate the payout to option holders. Falling back to the first fresh Chainlink round on a depeg — rejected by the founder: a ≥ 2 % USDG move endangers premium, escrow and bonds, so settlement should stop and go through the timelocked `resolveHalted` path with a human in the loop.
+
+**Why.** Measured USDG/USD 0.99975827 on 2026-09-02; the feed has the same 24 h heartbeat / 0.5 % deviation as the stock feeds (https://reference-data-directory.vercel.app/feeds-robinhood-mainnet.json). USDG is a Paxos-issued, LayerZero-bridged asset with issuer pause and freeze (SPEC §1.4), so a depeg is possible and must be handled explicitly.
+
+**Consequences.** SPEC.md §7.2, §9.2, §9.3, §9.5, §9.6, §12, §16.2, invariant I-9. Parameters `usdgBandLowBps/HighBps`, `usdgMaxStale` are timelocked.
+
+---
+
+## D-016 · 2026-09-02 · `writePool` is a post-launch placeholder
+
+**Decision.** `FeeRouter.writePool` (and the same reference used for cap valuation and MM-bond points) ships as `address(0)`. While zero, WRITE fee mode cannot be enabled and WRITE deposits are disabled. Set once by timelock after the token launches and a WRITE/USDG pool exists.
+
+**Alternatives considered.** Deferring the whole WRITE path to a v2 deployment — rejected: CLAUDE.md rule 6 requires both cap paths to exist from day one, and the fee path is cheap to include behind the same switch.
+
+**Consequences.** SPEC.md §11, §12, §16.3.
+
+---
+
+## D-017 · 2026-09-02 · Weekend TWAP sanity bound stays at 15 % globally, configurable per vault
+
+**Decision.** `weekendTwapBoundBps` global default 1 500; per-vault override by timelock within `[300, 1500]`.
+
+**Alternatives considered.** Starting at 1 000 bps for the first month — rejected: with launch caps of 25 000 USDG per vault (D-011) and the 250 000 USDG / 1 % liquidity rule (D-010), the manipulation profit ceiling (≈ 8.7 % of notional for a 5 % OTM weekend strike, SPEC §9.3) is small relative to the cost of moving the pool, and a tighter bound would trip on legitimate weekend moves in single names.
+
+**Consequences.** SPEC.md §9.3.

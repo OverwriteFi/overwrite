@@ -374,7 +374,7 @@ Primary — Chainlink round at or before expiry. Keeper hint `roundId r`. Accept
 4. sequencer hook passes.
 Then `S = r.answer`, `settlementPath = 1`.
 
-Fallback — TWAP, only if (1)–(3) cannot be satisfied by any round: 30-minute TWAP anchored at expiry (§9.5, `window = 1800`), accepted iff `|TWAP / lastChainlink.answer − 1| < 3 %` and the pool checks pass. `settlementPath = 2`.
+Fallback — TWAP, only if (1)–(3) cannot be satisfied by any round: 30-minute TWAP anchored at expiry (§9.5, `window = 1800`, USD-converted), accepted iff `|twapUSD / lastChainlink.answer − 1| < 3 %`, the pool checks of §9.3 pass, and the USDG/USD read is fresh and inside the band. `settlementPath = 2`.
 
 Else → `HALTED` (§9.6).
 
@@ -386,9 +386,10 @@ Primary — 60-minute Uniswap v3 TWAP anchored at expiry (§9.5, `window = 3600`
    - USDG = token0 (NVDA/USDG case): require `liquidity × (√1.01 − 1) ≥ 250 000e6 × sqrtPriceX96 / 2^96`
    - USDG = token1: same inequality (for a v3 swap the token1 amount is `L × ΔsqrtP` and the token0 amount is `L × Δ(1/sqrtP)`; both reduce to `L × (√1.01 − 1) / sqrtP ≥ Δ` for a 1 % price move in the direction that raises the stock price)
    with `√1.01 − 1` encoded as `4 987 562 / 1e9`; `swapNotionalUSDG` (250 000e6) and `impactBps` (100) are timelocked parameters; pool is the vault's immutable 0.05 % pool;
-2. sanity bound `|TWAP / lastChainlink.answer − 1| ≤ 15 %` where `lastChainlink` is the latest Chainlink answer at settle time (normally Friday's last 24/5 round);
-3. the settle call happens at `now ≤ expiry + twapGrace` (**1 800 s**, founder decision) so the anchored window is still inside the observation buffer.
-Then `S = TWAP`, `settlementPath = 2`.
+2. sanity bound `|twapUSD / lastChainlink.answer − 1| ≤ weekendTwapBoundBps` where `lastChainlink` is the latest Chainlink answer at settle time (normally Friday's last 24/5 round) and `twapUSD` is the USD-converted TWAP of §9.5. **Global default 1 500 bps (15 %), overridable per vault by timelock within `[300, 1500]`** (founder decision D-017);
+3. the settle call happens at `now ≤ expiry + twapGrace` (**1 800 s**, founder decision) so the anchored window is still inside the observation buffer;
+4. the USDG/USD feed read is fresh and inside the 0.98–1.02 band (§9.5). Out of band → HALTED immediately, no fallback (D-015); stale → TWAP invalid, continue to the fallback below.
+Then `S = twapUSD`, `settlementPath = 2`.
 
 Fallback — first fresh Chainlink round after expiry. Keeper hint `roundId r`. Accept iff:
 1. `validRound(r)` and `r.updatedAt > expiry`;
@@ -416,12 +417,19 @@ Price in USD (8 dec) per one stock token, with `dS = 18`, `dU = 6`:
 - if stock token is `token1` (NVDA/USDG case, token0 = USDG): `P_raw = 1.0001^tick = token1/token0 = stockWei per USDG unit`, so `price8 = 1e8 × 10^(dS − dU) / 1.0001^tick`; computed as `FullMath.mulDiv(1e8 × 1e12, 2^192, sqrtP²)`.
 - if stock token is `token0`: `price8 = 1e8 × 1.0001^tick / 10^(dS − dU)`; computed as `FullMath.mulDiv(sqrtP², 1e8, 2^192 × 1e12)`.
 Check against cast: tick 222534 → `1e12 / 1.0001^222534 ≈ 216.4`, feed answer 216.79. ✓
-USDG is treated at par to USD in v1 (USDG/USD feed read 0.99975827); the bound in §9.3 absorbs the difference. Optional per-vault `useUsdgFeed` flag (default false) multiplies by the USDG/USD answer when it is < 26 h old.
+USD conversion (founder decision D-015): the pool price is USDG per token; every TWAP used by the protocol is converted to USD with the USDG/USD Chainlink feed (`0x61B7e5650328764B076A108EFF5fa7282a1B9aD2`, 8 dec, heartbeat 86 400 s, read 0.99975827 on 2026-09-02):
+```
+twapUSD8 = twapUSDG8 × usdgUsd.answer / 1e8
+```
+Requirements on the USDG/USD read at the settle (or open) call:
+- `answer > 0` and `now − updatedAt ≤ 26 h`; if stale, the TWAP is **invalid** (the series falls through to the next path in §9.2/§9.3; a stale peg feed is not evidence of a depeg).
+- `0.98e8 ≤ answer ≤ 1.02e8`; if the answer is **outside the band, the weekend series is HALTED immediately** (§9.6), with no Chainlink fallback, because a ≥ 2 % USDG move is a systemic event for a protocol whose premium, escrow and bonds are in USDG. For a WEEKDAY series an out-of-band read makes the TWAP fallback invalid, which also leads to HALTED since it is the last path.
+`usdgBandLowBps = 9800`, `usdgBandHighBps = 10200`, `usdgMaxStale = 26 h` are timelocked global parameters. The same converted TWAP is used for `S_ref` (§7.2) and `S_cap` (§12).
 
 Deploy-time action: call `pool.increaseObservationCardinalityNext(65535)` on every allowlisted pool (permissionless; cardinality 6000 today on NVDA/USDG). With 100 ms blocks and one observation per block that has a swap, 6 000 observations may cover only minutes during busy sessions; 65 535 is the v3 maximum. The keeper monitors coverage (`slot0.observationCardinality` and the oldest observation timestamp) every hour and alerts if the buffer would not cover `window + twapGrace`.
 
 ### 9.6 HALTED and resolution
-- `settle` reverts with a typed error until the keeper (or anyone) calls `halt(seriesId)` once all paths are provably exhausted on-chain (for WEEKDAY: no valid round and `now > expiry + twapGrace`; for WEEKEND: `now > expiry + 54 060`). `halt` sets `state = HALTED`, calls `RiskModule.pauseNewAuctions(vaultId, reason)`, emits `SeriesHalted`.
+- `settle` reverts with a typed error until the keeper (or anyone) calls `halt(seriesId)` once all paths are provably exhausted on-chain (for WEEKDAY: no valid round and `now > expiry + twapGrace`; for WEEKEND: `now > expiry + 54 060`), or immediately for a WEEKEND series when the USDG/USD feed reads outside the 0.98–1.02 band at the call (`reason = USDG_DEPEG`, D-015). `halt` sets `state = HALTED`, calls `RiskModule.pauseNewAuctions(vaultId, reason)`, emits `SeriesHalted`. Reason codes: `NO_ORACLE_PATH`, `USDG_DEPEG`.
 - `resolveHalted(seriesId, price8, bytes evidenceURI)` — timelock only (48 h public delay). Sets `settlementPrice = price8`, `settlementPath = 4`, finishes settlement exactly as `settle` would. Option holders and depositors can observe the proposal in the timelock before execution.
 - While a vault is halted: no new auctions; deposits blocked; queued redeems are executed at resolution; `claimPremium` and claims for previously settled series keep working.
 
@@ -460,7 +468,7 @@ Rejected alternative, recorded for completeness: if `K` were defined per underly
 - Taken at clearing: `fee = premiumGross × feeBps / 1e4` USDG, `FeeRouter.collect(vaultId, fee)` is called by the AuctionHouse with the USDG already transferred.
 - Payment modes (per vault, set by the curator, effective after timelock):
   - `USDG` (default): the USDG fee is forwarded to `treasury` (a timelock-controlled address).
-  - `WRITE` (post-token, founder decision, reading confirmed 2026-09-02): the USDG fee is still deducted from premium at clearing; the FeeRouter then debits the curator's prefunded WRITE balance by `feeUSD × (1e4 − writeDiscountBps) / 1e4` converted at the WRITE/USDG 30-minute TWAP (`writePool`, set by timelock), burns `writeBurnShareBps` of it and forwards the rest to `treasury`; the USDG fee is then paid out to the curator's `feeRebateRecipient`. If the curator's WRITE balance is insufficient the router falls back to the USDG path for that clearing and emits `WriteModeFallback`. **`writeDiscountBps = 2000` (20 % discount), `writeBurnShareBps = 5000` (50 % of the WRITE burned, rest to treasury)** — founder decision D-011.
+  - `WRITE` (post-token, founder decision, reading confirmed 2026-09-02): the USDG fee is still deducted from premium at clearing; the FeeRouter then debits the curator's prefunded WRITE balance by `feeUSD × (1e4 − writeDiscountBps) / 1e4` converted at the WRITE/USDG 30-minute TWAP (`writePool`, **placeholder `address(0)` until the token launches; set by timelock post-launch, D-016**; while zero, `setFeeMode(WRITE)` reverts and `depositWrite` is disabled), burns `writeBurnShareBps` of it and forwards the rest to `treasury`; the USDG fee is then paid out to the curator's `feeRebateRecipient`. If the curator's WRITE balance is insufficient the router falls back to the USDG path for that clearing and emits `WriteModeFallback`. **`writeDiscountBps = 2000` (20 % discount), `writeBurnShareBps = 5000` (50 % of the WRITE burned, rest to treasury)** — founder decision D-011.
 - `depositWrite(vaultId, amount)` / `withdrawWrite(vaultId, amount)` by the curator; withdrawals allowed any time (no lock).
 
 ---
@@ -550,7 +558,7 @@ Frontend
 - `fee.mode(vaultId)`, `fee.writeBalance(vaultId)`
 - `bond.status(account, kind) → (amount, asset, unlockAt)`
 - `token.uiMultiplier()`, `token.newUIMultiplier()`, `token.effectiveAt()`, `token.oraclePaused()` for disclosure banners
-- `oracle.lastChainlink(vaultId) → (answer, updatedAt)` and `oracle.twap(vaultId, window)` for the settlement-preview panel
+- `oracle.lastChainlink(vaultId) → (answer, updatedAt)`, `oracle.twap(vaultId, window) → (twapUSDG8, twapUSD8)` and `oracle.usdgUsd() → (answer, updatedAt, inBand)` for the settlement-preview panel
 
 ### 16.3 Points (off-chain indexer, founder decision D-013)
 - Snapshot once per day at 00:00:00 UTC (first L2 block with `timestamp ≥ midnight`).
@@ -571,6 +579,7 @@ Frontend
 - **I-6 Windows**: `Deposit`/`Withdraw` events only occur while `state == IDLE`; queued executions only occur at or after a settlement of the same vault.
 - **I-7 Guardian scope**: no guardian-only function changes any storage other than pause flags.
 - **I-8 Share price monotonicity outside settlement**: `convertToAssets(1e18)` is constant between two settlements of the same vault (no fees on principal, no rebasing).
+- **I-9 USDG peg guard**: no `SeriesSettled` with `settlementPath == 2` exists whose settle block had a USDG/USD answer outside `[0.98e8, 1.02e8]` or older than 26 h.
 
 ---
 
@@ -578,10 +587,9 @@ Frontend
 
 Resolved on 2026-09-02 (see DECISIONS.md D-009 to D-014): curator bond 10 000 USDG; relative strike grid 0.25 % with per-kind distance bounds and per-asset-class defaults; 100 % of unencumbered balance net of queued redeems written per series; TWAP liquidity rule (250 000 USDG swap < 1 % impact) and 30-minute grace; WRITE fee 20 % discount / 50 % burn; caps k = 5 with governance weights defaulting to an equal split and 25 000 USDG per vault pre-token; guardian is a hot key on the keeper server; option tokens freely transferable; points formula; testnet mocks + mainnet-fork tests.
 
-Still open:
-- OQ-A Whether to enable `useUsdgFeed` (§9.5) from day one, i.e. convert the USDG-denominated TWAP to USD with the USDG/USD feed.
-- OQ-B The WRITE/USDG pool address and fee tier to use as `writePool` for fee mode, caps and MM-bond points (only knowable after the token launch).
-- OQ-C Whether the 8.7 %-of-notional worst case in §9.3 is acceptable at launch sizes, or the weekend TWAP bound should start at 1 000 bps and be raised to 1 500 after the first month.
+Closed on 2026-09-02 (D-015 to D-017): TWAPs are converted to USD with the USDG/USD feed and the weekend path halts on a USDG/USD read outside 0.98–1.02; `writePool` is a post-launch placeholder (`address(0)`); the weekend TWAP bound stays at 15 % globally, per-vault configurable.
+
+No open questions remain for v0.1. New questions go here with an `OQ-` id and are closed with a DECISIONS.md entry.
 
 ---
 
