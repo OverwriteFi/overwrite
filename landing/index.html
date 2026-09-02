@@ -1,0 +1,537 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Overwrite — Make your Stock Tokens pay you every week</title>
+<meta name="description" content="Overwrite is the yield layer for tokenized stocks on Robinhood Chain. Market makers bid for your upside every week and pay premium in USDG up front. Two auctions a week, including the weekend.">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Schibsted+Grotesk:ital,wght@0,400..900;1,400..900&display=swap" rel="stylesheet">
+<style>
+  :root{
+    --bg:#FFFFFF;
+    --bg-2:#F1F2EE;
+    --ink:#000000;
+    --gray:#62676F;
+    --rule:#D9DBDF;
+    --blue:#2A3BFF;
+    --blue-dark:#1B27B8;
+    --blue-tint:#E8EAFF;
+    --max:1200px;
+    --gutter:24px;
+  }
+  *{box-sizing:border-box}
+  body{
+    margin:0;background:var(--bg);color:var(--ink);
+    font-family:"Schibsted Grotesk",system-ui,sans-serif;
+    font-size:17px;line-height:1.5;-webkit-font-smoothing:antialiased;
+    font-variant-numeric:tabular-nums;overflow-x:clip;
+  }
+  a{color:inherit}
+  h1,h2,h3{margin:0;font-weight:800;letter-spacing:-0.03em;line-height:1}
+  p{margin:0}
+  .wrap{max-width:var(--max);margin:0 auto;padding-left:var(--gutter);padding-right:var(--gutter)}
+  :focus-visible{outline:3px solid var(--blue);outline-offset:3px}
+
+  /* nav */
+  .nav{display:flex;align-items:center;justify-content:space-between;padding:20px 0;border-bottom:1px solid var(--ink)}
+  .mark{text-decoration:none;font-weight:800;font-size:21px;letter-spacing:-0.03em;display:flex;align-items:center;gap:10px}
+  .mark i{display:inline-block;width:14px;height:14px;background:var(--blue);border-radius:2px}
+  .nav ul{list-style:none;margin:0;padding:0;display:flex;gap:26px;align-items:center}
+  .nav li a{text-decoration:none;font-size:15px;color:var(--gray)}
+  .nav li a:hover{color:var(--ink)}
+  .btn{white-space:nowrap;display:inline-block;text-decoration:none;font-weight:700;font-size:15px;padding:12px 18px;border-radius:3px;border:1.5px solid var(--blue);line-height:1;transition:background .15s,color .15s,border-color .15s}
+  .btn-blue{background:var(--blue);color:#fff}
+  .btn-blue:hover{background:var(--blue-dark);border-color:var(--blue-dark)}
+  .btn-plain{background:transparent;color:var(--blue)}
+  .btn-plain:hover{background:var(--blue-tint)}
+  .nav .btn{padding:10px 14px}
+  @media (max-width:720px){.nav ul li:not(:last-child){display:none}}
+
+  /* hero */
+  .hero{display:grid;grid-template-columns:minmax(0,1.05fr) minmax(0,1fr);gap:56px;padding:64px 0 72px;align-items:start}
+  .hero h1{font-size:clamp(40px,5.2vw,72px);max-width:13ch}
+  .hero .lede{margin-top:24px;font-size:clamp(17px,1.35vw,19px);max-width:46ch;color:var(--ink)}
+  .hero .cta{margin-top:28px;display:flex;gap:12px;align-items:center;flex-wrap:wrap}
+  .hero .doc{font-size:15px;color:var(--gray);text-decoration:underline;text-underline-offset:4px}
+  @media (max-width:900px){.hero{grid-template-columns:1fr;gap:36px;padding:44px 0 56px}}
+
+  /* calculator */
+  .calc{border:1.5px solid var(--ink);border-radius:4px;padding:22px 22px 18px;background:#fff}
+  .calc-head{display:flex;justify-content:space-between;align-items:baseline;gap:16px;flex-wrap:wrap}
+  .calc-head h2{font-size:18px;font-weight:700;letter-spacing:-0.01em}
+  .calc-head small{font-size:13px;color:var(--gray)}
+  .seg{display:flex;gap:6px;margin-top:16px;flex-wrap:wrap}
+  .seg button{font:inherit;font-weight:700;font-size:14px;padding:8px 12px;border:1.5px solid var(--rule);background:#fff;border-radius:3px;cursor:pointer;color:var(--ink)}
+  .seg button[aria-pressed="true"]{border-color:var(--blue);background:var(--blue-tint);color:var(--blue-dark)}
+  .row{display:grid;grid-template-columns:1fr 1fr;gap:18px;margin-top:18px}
+  .field label{display:block;font-size:13px;color:var(--gray);margin-bottom:6px}
+  .field input[type=number]{font:inherit;font-size:18px;font-weight:700;width:100%;padding:8px 10px;border:1.5px solid var(--rule);border-radius:3px;background:#fff;color:var(--ink)}
+  .field input[type=range]{width:100%;accent-color:var(--blue);margin:10px 0 0}
+  .field .val{font-size:18px;font-weight:700}
+  .out{margin-top:18px;border-top:1px solid var(--ink);padding-top:14px;display:grid;grid-template-columns:1fr 1fr 1fr;gap:14px}
+  .out .k{font-size:13px;color:var(--gray)}
+  .out .v{font-size:clamp(22px,2.2vw,30px);font-weight:800;letter-spacing:-0.02em;color:var(--blue);line-height:1.1;margin-top:2px}
+  .out .v.ink{color:var(--ink)}
+  .chart{margin-top:16px}
+  .chart svg{width:100%;height:auto;display:block}
+  .chart text{font-family:"Schibsted Grotesk",sans-serif;font-size:11px;fill:var(--gray)}
+  .chart .hold{stroke:var(--rule);stroke-width:2;fill:none}
+  .chart .ow{stroke:var(--blue);stroke-width:2.5;fill:none;transition:d .25s ease}
+  .chart .axis{stroke:var(--rule);stroke-width:1}
+  .chart .zero{stroke:var(--ink);stroke-width:1}
+  .chart .kline{stroke:var(--blue);stroke-width:1;stroke-dasharray:3 3;transition:transform .25s ease}
+  .note{margin-top:12px;font-size:13px;color:var(--gray);line-height:1.45}
+  @media (max-width:520px){.row{grid-template-columns:1fr}.out{grid-template-columns:1fr 1fr}.calc{padding:16px}}
+
+  /* sections */
+  .sec{padding:88px 0 0}
+  .sec h2{font-size:clamp(30px,3.6vw,48px);max-width:22ch}
+  .sec .sub{margin-top:14px;max-width:58ch;color:var(--gray)}
+  .band{background:var(--bg-2);margin-top:88px;padding:72px 0}
+  .band .sec{padding-top:0}
+
+  /* payoff explainer */
+  .three{display:grid;grid-template-columns:repeat(3,1fr);gap:40px;margin-top:40px}
+  .three h3{font-size:19px;font-weight:700;letter-spacing:-0.01em;padding-top:14px;border-top:1.5px solid var(--ink)}
+  .three p{margin-top:10px;font-size:16px;max-width:34ch}
+  .three .n{color:var(--blue);font-weight:800}
+  @media (max-width:820px){.three{grid-template-columns:1fr;gap:24px}}
+
+  /* series table + ledger */
+  table{width:100%;border-collapse:collapse;margin-top:36px}
+  caption{text-align:left;font-size:13px;color:var(--gray);padding-bottom:12px;caption-side:top}
+  th{text-align:left;font-weight:500;font-size:13px;color:var(--gray);padding:0 0 10px;border-bottom:1.5px solid var(--ink)}
+  td{padding:16px 0;border-bottom:1px solid var(--rule);vertical-align:top;font-size:16.5px}
+  th:not(:first-child),td:not(:first-child){padding-left:18px}
+  td.b{font-weight:700}
+  .series td:first-child{font-weight:800;font-size:19px;letter-spacing:-0.02em}
+  .ledger .sym{font-weight:800;font-size:21px;letter-spacing:-0.02em;line-height:1}
+  .ledger .name{display:block;font-size:13px;color:var(--gray);margin-top:4px}
+  .ledger .pct{color:var(--blue);font-weight:800}
+  .ledger .cap{display:flex;align-items:center;gap:10px}
+  .ledger .cap i{width:110px;height:5px;background:var(--rule);position:relative;display:block;border-radius:2px;overflow:hidden}
+  .ledger .cap i::after{content:"";position:absolute;inset:0;width:var(--w);background:var(--ink)}
+  .ledger .act{text-align:right}
+  .ledger .act a{text-decoration:none;font-weight:700;color:var(--blue);white-space:nowrap}
+  .ledger .act a.soon{color:var(--gray)}
+  .ledger tr:hover td{background:rgba(42,59,255,.04)}
+  @media (max-width:820px){.series th:nth-child(4),.series td:nth-child(4){display:none}.ledger th:nth-child(4),.ledger td:nth-child(4){display:none}}
+  @media (max-width:600px){
+    .ledger th:nth-child(3),.ledger td:nth-child(3){display:none}
+    .ledger .name{display:none}.ledger .cap i{display:none}
+    .series th:nth-child(3),.series td:nth-child(3){display:none}
+    td{font-size:15px}
+    th:not(:first-child),td:not(:first-child){padding-left:12px}
+  }
+
+  /* counterparty */
+  .two{display:grid;grid-template-columns:1fr 1fr;gap:48px;margin-top:36px}
+  .two p{max-width:48ch}
+  .two p + p{margin-top:14px}
+  @media (max-width:820px){.two{grid-template-columns:1fr;gap:20px}}
+
+  /* token */
+  .jobs{display:grid;grid-template-columns:repeat(3,1fr);gap:40px;margin-top:40px}
+  .jobs h3{font-size:19px;font-weight:700;letter-spacing:-0.01em;padding-top:14px;border-top:1.5px solid var(--blue)}
+  .jobs p{margin-top:10px;font-size:16px;max-width:34ch}
+  .not{margin-top:36px;padding:22px 24px;border:1.5px solid var(--ink);border-radius:4px;max-width:760px}
+  .not h3{font-size:17px;font-weight:700}
+  .not p{margin-top:8px;font-size:16px}
+  @media (max-width:820px){.jobs{grid-template-columns:1fr;gap:24px}}
+
+
+  /* WRITE loop */
+  .loop-head{display:flex;justify-content:space-between;align-items:flex-start;gap:32px}
+  .wheel{width:72px;height:72px;flex:none;margin-top:6px}
+  .wheel g{transform-origin:40px 40px;animation:spin var(--spin,8s) linear infinite}
+  @keyframes spin{to{transform:rotate(360deg)}}
+  .loop{margin-top:40px;border:1.5px solid var(--ink);border-radius:4px;padding:26px 26px 22px}
+  .ctl label{display:block;font-size:13px;color:var(--gray)}
+  .ctl .val{font-size:clamp(26px,3vw,40px);font-weight:800;letter-spacing:-0.03em;color:var(--blue);line-height:1.05;margin-top:4px}
+  .ctl input[type=range]{width:100%;accent-color:var(--blue);margin:14px 0 0}
+  .ctl .ticks{display:flex;justify-content:space-between;font-size:12px;color:var(--gray);margin-top:4px}
+  .stations{list-style:none;margin:30px 0 0;padding:0;display:grid;grid-template-columns:repeat(4,1fr);gap:0;counter-reset:st}
+  .stations li{position:relative;padding:18px 26px 18px 0;border-top:1.5px solid var(--ink)}
+  .stations li + li{padding-left:26px}
+  .stations li + li::before{content:"";position:absolute;left:-1px;top:-1.5px;width:0;height:0;border-left:11px solid var(--blue);border-top:7px solid transparent;border-bottom:7px solid transparent;transform:translateY(-6px)}
+  .stations .k{display:block;font-size:13px;color:var(--gray)}
+  .stations .v{display:block;font-size:clamp(24px,2.4vw,34px);font-weight:800;letter-spacing:-0.03em;color:var(--blue);line-height:1.1;margin-top:4px}
+  .stations p{margin-top:10px;font-size:15px;max-width:30ch}
+  .stations p b{color:var(--blue)}
+  .stations .v small{font-size:15px;font-weight:600;color:var(--gray);letter-spacing:0}
+  .ret{height:40px;border:1.5px solid var(--blue);border-top:0;border-radius:0 0 8px 8px;position:relative;margin:6px 0 0}
+  .ret::before{content:"";position:absolute;left:-7px;top:-4px;width:0;height:0;border-bottom:12px solid var(--blue);border-left:6px solid transparent;border-right:6px solid transparent}
+  .ret-label{margin-top:14px;font-size:15px;color:var(--gray);max-width:70ch}
+  .ret-label b{color:var(--ink);font-weight:700}
+  @media (max-width:900px){
+    .stations{grid-template-columns:1fr}
+    .stations li,.stations li + li{padding:16px 0}
+    .stations li + li::before{left:0;top:-1.5px;transform:translateY(-6px) rotate(90deg);border-left-color:var(--blue)}
+    .ret{display:none}
+    .loop{padding:18px 16px 16px}
+    .wheel{width:52px;height:52px}
+  }
+  @media (prefers-reduced-motion:reduce){.wheel g{animation:none}}
+
+  /* claim */
+  .claim{margin:0;padding:22px 0;border-top:1.5px solid var(--ink);border-bottom:1.5px solid var(--ink);font-size:clamp(18px,2vw,26px);font-weight:700;letter-spacing:-0.02em;line-height:1.25;max-width:32ch}
+
+  /* end cta */
+  .end{margin-top:96px;border-top:1.5px solid var(--ink);padding-top:40px;display:flex;justify-content:space-between;align-items:flex-end;gap:32px;flex-wrap:wrap}
+  .end h2{font-size:clamp(28px,3.4vw,44px);max-width:20ch}
+  .end p{margin-top:12px;color:var(--gray);max-width:46ch}
+
+  /* footer */
+  footer.wrap{padding-top:56px;padding-bottom:64px;font-size:13.5px;color:var(--gray)}
+  footer .cols{display:grid;grid-template-columns:2fr 1fr;gap:40px}
+  footer p{max-width:78ch;line-height:1.55}
+  footer p + p{margin-top:10px}
+  footer ul{list-style:none;margin:0;padding:0;display:flex;flex-direction:column;gap:8px}
+  footer ul a{text-decoration:none}
+  footer ul a:hover{color:var(--ink)}
+  @media (max-width:720px){footer .cols{grid-template-columns:1fr}}
+
+  @media (prefers-reduced-motion:reduce){.chart .ow,.chart .kline{transition:none}}
+</style>
+</head>
+<body>
+
+<header class="wrap">
+  <nav class="nav" aria-label="Main">
+    <a class="mark" href="#"><i aria-hidden="true"></i>Overwrite</a>
+    <ul>
+      <li><a href="#tradeoff">How it works</a></li>
+      <li><a href="#write">The loop</a></li>
+      <li><a href="#vaults">Vaults</a></li>
+      <li><a href="#makers">Market makers</a></li>
+      <li><a class="btn btn-blue" href="#vaults">Open app</a></li>
+    </ul>
+  </nav>
+</header>
+
+<main>
+  <section class="wrap hero">
+    <div>
+      <h1>Make your Stock Tokens pay you every week.</h1>
+      <p class="lede">Overwrite is the yield layer for tokenized stocks on Robinhood Chain. Deposit NVDA, TSLA or QQQ, and market makers bid for your upside every week, paying premium in USDG up front. Two auctions a week, including the weekend, which no exchange on earth can sell.</p>
+      <div class="cta">
+        <a class="btn btn-blue" href="#vaults">Open app</a>
+        <a class="btn btn-plain" href="#write">See the WRITE loop</a>
+        <a class="doc" href="#">Documentation</a>
+      </div>
+    </div>
+
+    <div class="calc" id="calc">
+      <div class="calc-head">
+        <h2>What a week could pay</h2>
+        <small>Model estimate from recent volatility. Real premium is set at auction.</small>
+      </div>
+      <div class="seg" role="group" aria-label="Stock Token">
+        <button type="button" data-t="NVDA" aria-pressed="true">NVDA</button>
+        <button type="button" data-t="TSLA" aria-pressed="false">TSLA</button>
+        <button type="button" data-t="GME" aria-pressed="false">GME</button>
+        <button type="button" data-t="QQQ" aria-pressed="false">QQQ</button>
+        <button type="button" data-t="SPY" aria-pressed="false">SPY</button>
+      </div>
+      <div class="row">
+        <div class="field">
+          <label for="amt">Deposit, in USDG</label>
+          <input id="amt" type="number" min="100" step="100" value="10000" inputmode="numeric">
+        </div>
+        <div class="field">
+          <label for="strike">Upside you keep before the cap</label>
+          <div class="val"><span id="strikeVal">8</span>% above today's price</div>
+          <input id="strike" type="range" min="1" max="15" step="1" value="8" aria-valuemin="1" aria-valuemax="15">
+        </div>
+      </div>
+      <div class="out">
+        <div><div class="k">Premium this week</div><div class="v" id="oPct">—</div></div>
+        <div><div class="k">In USDG</div><div class="v ink" id="oUsd">—</div></div>
+        <div><div class="k">Annualised</div><div class="v" id="oApr">—</div></div>
+      </div>
+      <div class="chart" aria-label="Chart comparing holding the token with the vault over one week of price changes">
+        <svg viewBox="0 0 560 250" id="pay"></svg>
+      </div>
+      <p class="note" id="oNote"></p>
+    </div>
+  </section>
+
+  <div class="wrap"><p class="claim">190+ Stock Tokens trade around the clock on Robinhood Chain. Not one of them wrote a single option. Until now.</p></div>
+
+  <section class="wrap sec" id="tradeoff">
+    <h2>Three outcomes. You get paid in all three.</h2>
+    <p class="sub">Premium is paid the moment the auction clears, before the week even starts. Whatever the price does after that, it is already yours.</p>
+    <div class="three">
+      <div>
+        <h3>Price drifts</h3>
+        <p>You collect the premium while everyone else waits. This is most weeks, and it compounds: the option expires, the vault writes the next one.</p>
+      </div>
+      <div>
+        <h3>Price rallies</h3>
+        <p>You keep every point of the move up to the cap, plus the premium on top. Set the cap higher when you want more of the run.</p>
+      </div>
+      <div>
+        <h3>Price dips</h3>
+        <p>You still hold every token, and the premium cushions the move. Fully covered, no leverage, no liquidations, ever.</p>
+      </div>
+    </div>
+  </section>
+
+  <section class="wrap sec" id="write">
+    <div class="loop-head">
+      <div>
+        <h2>The WRITE loop.</h2>
+        <p class="sub">WRITE is the protocol's token. Every arrow below is a rule in the contracts, not a roadmap. Move the slider to see how the vaults and the token pull on each other.</p>
+      </div>
+      <svg class="wheel" viewBox="0 0 80 80" aria-hidden="true"><g>
+        <circle cx="40" cy="40" r="34" fill="none" stroke="#2A3BFF" stroke-width="6"/>
+        <circle cx="40" cy="40" r="7" fill="#2A3BFF"/>
+        <path d="M40 9v24M40 47v24M9 40h24M47 40h24" stroke="#2A3BFF" stroke-width="4" stroke-linecap="round"/>
+      </g></svg>
+    </div>
+
+    <div class="loop">
+      <div class="ctl">
+        <label for="stake">WRITE staked in the backstop, at market value</label>
+        <div class="val" id="stakeVal">$2.0M</div>
+        <input id="stake" type="range" min="0" max="8" step="1" value="3" aria-valuemin="0" aria-valuemax="8">
+        <div class="ticks"><span>$250k</span><span>$100M</span></div>
+      </div>
+
+      <ol class="stations">
+        <li>
+          <span class="k">Backstop</span>
+          <span class="v" id="lStake">$2.0M</span>
+          <p>Staked WRITE covers shortfalls. It also sets the ceiling: vaults may hold at most 5 times this.</p>
+        </li>
+        <li>
+          <span class="k">Vault capacity</span>
+          <span class="v" id="lCap">$10.0M</span>
+          <p>Depositors fill it with Stock Tokens. This model assumes 75% of the cap is used.</p>
+        </li>
+        <li>
+          <span class="k">Premium written each week</span>
+          <span class="v" id="lPrem">$52.5k</span>
+          <p>At an average 0.7% a week. Depositors keep 90%; the protocol keeps 10% as its fee.</p>
+        </li>
+        <li>
+          <span class="k">WRITE burned and bonded</span>
+          <span class="v" id="lBurn">$1.6k<small> a week</small></span>
+          <p>Fees paid in WRITE get a discount, so most are; half of that WRITE is burned. Market makers each bond $50k of WRITE to bid: <b id="lBond">$250k</b> locked.</p>
+        </li>
+      </ol>
+
+      <div class="ret" aria-hidden="true"></div>
+      <p class="ret-label">Less supply, more locked, a larger backstop. Next week's ceiling is higher, and the loop runs again. <b id="lYear">About $82k of WRITE burned a year at this size.</b></p>
+    </div>
+
+    <div class="not">
+      <h3>One token, every lever</h3>
+      <p>WRITE sets the caps, bonds the market makers and curators, and takes the fees at a discount. Demand for it is written into the contracts, not into a marketing plan. No revenue share, and none needed.</p>
+    </div>
+  </section>
+
+  <div class="band">
+    <section class="wrap sec" id="series">
+      <h2>Two paydays a week.</h2>
+      <p class="sub">Stock Tokens trade 24/7. Listed options stop at Friday's close. Overwrite sells the weekend as its own series, premium no other venue can collect.</p>
+      <table class="series">
+        <thead>
+          <tr><th scope="col">Series</th><th scope="col">Auction</th><th scope="col">Expires</th><th scope="col">Settles on</th><th scope="col">Default cap</th></tr>
+        </thead>
+        <tbody>
+          <tr><td>Weekday</td><td>Monday 14:00 UTC, 15 minutes</td><td>Friday at the New York close</td><td>Chainlink price feed</td><td class="b">+8% above spot</td></tr>
+          <tr><td>Weekend</td><td>Friday, 10 minutes after the close</td><td>Sunday 23:59 UTC</td><td>Chainlink, with Uniswap TWAP fallback</td><td class="b">+5% above spot</td></tr>
+        </tbody>
+      </table>
+    </section>
+  </div>
+
+  <section class="wrap sec" id="vaults">
+    <h2>Vaults.</h2>
+    <p class="sub">One vault per Stock Token, fully covered, no leverage. Capacity is set by the backstop and grows as more WRITE is staked, so the vaults you see are the ones filling first.</p>
+    <table class="ledger">
+      <caption>Premium figures are model estimates at the default caps. Live figures come from the last auction.</caption>
+      <thead>
+        <tr><th scope="col">Vault</th><th scope="col">Est. weekly premium</th><th scope="col">Annualised</th><th scope="col">Caps, weekday / weekend</th><th scope="col">Deposits</th><th scope="col"></th></tr>
+      </thead>
+      <tbody>
+        <tr data-t="NVDA"><td><span class="sym">NVDA</span><span class="name">NVIDIA Stock Token</span></td><td class="pct"></td><td class="apr"></td><td class="capv"></td><td><span class="cap"><i style="--w:71%"></i>71% of cap</span></td><td class="act"><a href="#">Deposit</a></td></tr>
+        <tr data-t="TSLA"><td><span class="sym">TSLA</span><span class="name">Tesla Stock Token</span></td><td class="pct"></td><td class="apr"></td><td class="capv"></td><td><span class="cap"><i style="--w:84%"></i>84% of cap</span></td><td class="act"><a href="#">Deposit</a></td></tr>
+        <tr data-t="GME"><td><span class="sym">GME</span><span class="name">GameStop Stock Token</span></td><td class="pct"></td><td class="apr"></td><td class="capv"></td><td><span class="cap"><i style="--w:96%"></i>96% of cap</span></td><td class="act"><a href="#">Deposit</a></td></tr>
+        <tr data-t="QQQ"><td><span class="sym">QQQ</span><span class="name">Invesco QQQ Stock Token</span></td><td class="pct"></td><td class="apr"></td><td class="capv"></td><td><span class="cap"><i style="--w:42%"></i>42% of cap</span></td><td class="act"><a href="#">Deposit</a></td></tr>
+        <tr data-t="SPY"><td><span class="sym">SPY</span><span class="name">SPDR S&amp;P 500 Stock Token</span></td><td class="pct"></td><td class="apr"></td><td class="capv"></td><td><span class="cap"><i style="--w:38%"></i>38% of cap</span></td><td class="act"><a href="#">Deposit</a></td></tr>
+      </tbody>
+    </table>
+  </section>
+
+  <section class="wrap sec" id="makers">
+    <h2>Market makers compete for your upside.</h2>
+    <div class="two">
+      <div>
+        <p>Every week, bonded market makers bid against each other for the right to buy your upside. It is a batch auction: the vault fills the highest bids first, and every winner pays the same clearing price. More bidders, higher premium.</p>
+        <p>Bids are escrowed in USDG before the auction clears, so the money is in the vault the moment it ends. Premium first, options second.</p>
+      </div>
+      <div>
+        <p>The vault sets a floor from live volatility. Your upside never goes cheap: if the bids are not there, the vault simply keeps it and sells it next week.</p>
+        <p>Settlement runs on the official Chainlink feed for each Stock Token, entirely on-chain. Nothing is ever sold on an exchange to settle.</p>
+      </div>
+    </div>
+  </section>
+
+  <section class="wrap sec" id="join">
+    <div class="end">
+      <div>
+        <h2>Capacity fills in order. Get in line.</h2>
+        <p>The first vaults open with the first backstop. Leave an address and you will know the moment the first auction clears, with the premium it paid.</p>
+      </div>
+      <a class="btn btn-blue" href="#">Get in line</a>
+    </div>
+  
+  </section>
+</main>
+
+<footer class="wrap">
+  <div class="cols">
+    <div>
+      <p>Overwrite is an independent protocol deployed on Robinhood Chain. It is not affiliated with, operated by, or endorsed by Robinhood. Stock Tokens are tokenised debt securities issued by Robinhood Assets (Jersey) Limited; they provide economic exposure to underlying securities and do not confer ownership or shareholder rights.</p>
+      <p>Not available to US persons. Restrictions apply in other jurisdictions including Canada, the United Kingdom, Switzerland and the United Arab Emirates. Premium is set at auction each week; figures on this page are model estimates.</p>
+    </div>
+    <ul>
+      <li><a href="#">Documentation</a></li>
+      <li><a href="#">Contracts on Blockscout</a></li>
+      <li><a href="#">X</a></li>
+      <li><a href="#">Terms</a></li>
+    </ul>
+  </div>
+</footer>
+
+<script>
+(function(){
+  // Annualised volatility assumptions (illustrative)
+  var VOL = {NVDA:0.55, TSLA:0.70, GME:0.95, QQQ:0.22, SPY:0.18};
+  var CAP = {NVDA:8, TSLA:8, GME:8, QQQ:2, SPY:2};
+  var T_WEEKDAY = 4.3/365, T_WEEKEND = 2.2/365;
+
+  function ncdf(x){
+    var t = 1/(1+0.2316419*Math.abs(x));
+    var d = 0.3989423*Math.exp(-x*x/2);
+    var p = d*t*(0.3193815+t*(-0.3565638+t*(1.781478+t*(-1.821256+t*1.330274))));
+    return x>0 ? 1-p : p;
+  }
+  // Black-Scholes call price as a fraction of spot, r=0
+  function call(k, sigma, T){
+    var s = sigma*Math.sqrt(T);
+    var d1 = (Math.log(1/k))/s + s/2, d2 = d1 - s;
+    return Math.max(0, ncdf(d1) - k*ncdf(d2));
+  }
+  function weekPremium(t, dist){
+    var wk = call(1+dist/100, VOL[t], T_WEEKDAY);
+    var weDist = Math.max(1, Math.round(dist*0.6));
+    var we = call(1+weDist/100, VOL[t], T_WEEKEND);
+    return {total: wk+we, wk:wk, we:we, weDist:weDist};
+  }
+  function pct(x, d){ return (x*100).toFixed(d===undefined?2:d)+'%'; }
+  function usd(x){ return '$'+Math.round(x).toLocaleString('en-US'); }
+
+  // Calculator state
+  var ticker = 'NVDA';
+  var amt = document.getElementById('amt');
+  var strike = document.getElementById('strike');
+  var svg = document.getElementById('pay');
+
+  function drawChart(dist, prem){
+    var W=560,H=250,L=44,R=14,Tp=16,B=30;
+    var xmin=-15,xmax=20,ymin=-15,ymax=20;
+    function X(v){ return L + (v-xmin)/(xmax-xmin)*(W-L-R); }
+    function Y(v){ return Tp + (ymax-v)/(ymax-ymin)*(H-Tp-B); }
+    var hold='', ow='';
+    for (var v=xmin; v<=xmax; v+=0.5){
+      var y1 = v, y2 = Math.min(v, dist) + prem*100;
+      hold += (v===xmin?'M':'L')+X(v).toFixed(1)+','+Y(y1).toFixed(1)+' ';
+      ow += (v===xmin?'M':'L')+X(v).toFixed(1)+','+Y(y2).toFixed(1)+' ';
+    }
+    var ticks=[-15,-10,-5,0,5,10,15,20];
+    var s='';
+    s+='<line class="axis" x1="'+L+'" y1="'+Tp+'" x2="'+L+'" y2="'+(H-B)+'"/>';
+    s+='<line class="zero" x1="'+L+'" y1="'+Y(0)+'" x2="'+(W-R)+'" y2="'+Y(0)+'"/>';
+    ticks.forEach(function(t){
+      s+='<text x="'+X(t)+'" y="'+(H-10)+'" text-anchor="middle">'+(t>0?'+':'')+t+'%</text>';
+      s+='<text x="'+(L-6)+'" y="'+(Y(t)+4)+'" text-anchor="end">'+(t>0?'+':'')+t+'%</text>';
+    });
+    s+='<line class="kline" x1="'+X(dist)+'" y1="'+Tp+'" x2="'+X(dist)+'" y2="'+(H-B)+'"/>';
+    s+='<path class="hold" d="'+hold+'"/>';
+    s+='<path class="ow" d="'+ow+'"/>';
+    s+='<text x="'+(W-R)+'" y="'+(Y(xmax)+14)+'" text-anchor="end">Holding</text>';
+    s+='<text x="'+(W-R)+'" y="'+(Y(dist+prem*100)-8)+'" text-anchor="end" style="fill:#2A3BFF;font-weight:700">Vault</text>';
+    s+='<text x="'+(W-R)+'" y="'+(H-B-6)+'" text-anchor="end">Token price change over the week</text>';
+    svg.innerHTML = s;
+  }
+
+  function render(){
+    var dist = parseInt(strike.value,10);
+    var a = Math.max(0, parseFloat(amt.value)||0);
+    var p = weekPremium(ticker, dist);
+    document.getElementById('strikeVal').textContent = dist;
+    document.getElementById('oPct').textContent = pct(p.total);
+    document.getElementById('oUsd').textContent = usd(a*p.total);
+    document.getElementById('oApr').textContent = pct(p.total*52, 0);
+    document.getElementById('oNote').textContent =
+      ticker+' at '+(VOL[ticker]*100).toFixed(0)+'% annualised volatility. Weekday series capped at +'+dist+'% pays about '+pct(p.wk)+
+      '; weekend series capped at +'+p.weDist+'% pays about '+pct(p.we)+'. Premium is paid up front at auction, and you keep every point of upside to +'+dist+'% on top of it.';
+    drawChart(dist, p.total);
+  }
+
+  document.querySelectorAll('.seg button').forEach(function(b){
+    b.addEventListener('click', function(){
+      document.querySelectorAll('.seg button').forEach(function(x){ x.setAttribute('aria-pressed','false'); });
+      b.setAttribute('aria-pressed','true');
+      ticker = b.getAttribute('data-t');
+      strike.value = CAP[ticker];
+      render();
+    });
+  });
+  amt.addEventListener('input', render);
+  strike.addEventListener('input', render);
+  render();
+
+
+  // WRITE loop model (illustrative)
+  var STEPS = [250000, 500000, 1000000, 2000000, 5000000, 10000000, 25000000, 50000000, 100000000];
+  var K = 5, UTIL = 0.75, WEEKLY = 0.007, FEE = 0.10, IN_WRITE = 0.6, BURN = 0.5, MM_PER = 2000000, BOND = 50000;
+  function money(x){
+    if (x >= 1e9) return '$'+(x/1e9).toFixed(1)+'B';
+    if (x >= 1e6) return '$'+(x/1e6).toFixed(1)+'M';
+    if (x >= 1e3) return '$'+(x/1e3).toFixed(x<1e4?1:0)+'k';
+    return '$'+Math.round(x);
+  }
+  var stakeEl = document.getElementById('stake');
+  function loop(){
+    var i = parseInt(stakeEl.value,10), st = STEPS[i];
+    var cap = st*K, dep = cap*UTIL, prem = dep*WEEKLY, fee = prem*FEE;
+    var burn = fee*IN_WRITE*BURN, mms = Math.max(2, Math.round(cap/MM_PER)), bond = mms*BOND;
+    document.getElementById('stakeVal').textContent = money(st);
+    document.getElementById('lStake').textContent = money(st);
+    document.getElementById('lCap').textContent = money(cap);
+    document.getElementById('lPrem').textContent = money(prem);
+    document.getElementById('lBurn').innerHTML = money(burn)+'<small> a week</small>';
+    document.getElementById('lBond').textContent = money(bond);
+    document.getElementById('lYear').textContent = 'About '+money(burn*52)+' of WRITE burned a year at this size, with '+mms+' market makers bonded.';
+    document.querySelector('.wheel').style.setProperty('--spin', (Math.max(2.5, 24/(i+1))).toFixed(1)+'s');
+  }
+  stakeEl.addEventListener('input', loop);
+  loop();
+
+  // Ledger rows use the same model at the default caps
+  document.querySelectorAll('.ledger tr[data-t]').forEach(function(tr){
+    var t = tr.getAttribute('data-t'), p = weekPremium(t, CAP[t]);
+    tr.querySelector('.pct').textContent = pct(p.total);
+    tr.querySelector('.apr').textContent = pct(p.total*52, 0);
+    tr.querySelector('.capv').textContent = '+'+CAP[t]+'% / +'+p.weDist+'%';
+  });
+})();
+</script>
+</body>
+</html>
