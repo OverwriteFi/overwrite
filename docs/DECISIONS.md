@@ -177,15 +177,15 @@ Format: ID · date · decision · alternatives considered · why · sources. New
 
 ---
 
-## D-015 · 2026-09-02 · TWAPs are converted to USD with the USDG/USD feed; weekend path halts on a USDG depeg beyond ±2 %
+## D-015 · 2026-09-02 (revised same day) · TWAPs are converted to USD with the USDG/USD feed; a depeg beyond ±2 % or a stale peg read invalidates the TWAP path only
 
-**Decision.** Every Uniswap TWAP the protocol uses (weekend primary, weekday fallback, reference spot, cap pricing) is multiplied by the USDG/USD Chainlink answer (`0x61B7e5650328764B076A108EFF5fa7282a1B9aD2`). If that answer is older than 26 h the TWAP is invalid and the series falls through to the next oracle path. If the answer is outside `[0.98, 1.02]` a weekend series is HALTED immediately with reason `USDG_DEPEG`, with no Chainlink fallback.
+**Decision.** Every Uniswap TWAP the protocol uses (weekend primary, weekday fallback, reference spot, cap pricing) is multiplied by the USDG/USD Chainlink answer (`0x61B7e5650328764B076A108EFF5fa7282a1B9aD2`). If that answer is older than 26 h **or** outside `[0.98, 1.02]`, the TWAP is invalid and the series falls through to the next oracle path: for a weekend series the first fresh Chainlink round after expiry (accepted until Monday 15:00 UTC), for a weekday series HALTED because the TWAP is already the last path. A depeg by itself never halts a weekend series.
 
-**Alternatives considered.** Treating USDG at par (the v0.1 draft) — rejected: strikes and Chainlink answers are in USD, so a USDG discount would systematically overstate the payout to option holders. Falling back to the first fresh Chainlink round on a depeg — rejected by the founder: a ≥ 2 % USDG move endangers premium, escrow and bonds, so settlement should stop and go through the timelocked `resolveHalted` path with a human in the loop.
+**Alternatives considered.** Treating USDG at par (the v0.1 draft) — rejected: strikes and Chainlink answers are in USD, so a USDG discount would systematically overstate the payout to option holders. Halting a weekend series immediately on a depeg with no Chainlink fallback (the first revision of this entry) — rejected by the founder: the Chainlink stock feed is USD-denominated and unaffected by USDG, so a valid fresh round is a better outcome than a 48 h timelocked manual resolution; the USDG exposure of premium, escrow and bonds is a treasury risk, not a settlement-price risk.
 
 **Why.** Measured USDG/USD 0.99975827 on 2026-09-02; the feed has the same 24 h heartbeat / 0.5 % deviation as the stock feeds (https://reference-data-directory.vercel.app/feeds-robinhood-mainnet.json). USDG is a Paxos-issued, LayerZero-bridged asset with issuer pause and freeze (SPEC §1.4), so a depeg is possible and must be handled explicitly.
 
-**Consequences.** SPEC.md §7.2, §9.2, §9.3, §9.5, §9.6, §12, §16.2, invariant I-9. Parameters `usdgBandLowBps/HighBps`, `usdgMaxStale` are timelocked.
+**Consequences.** SPEC.md §7.2, §9.2, §9.3, §9.5, §9.6, §12, §16.1 (`TwapRejected` event), §16.2, invariant I-9. Parameters `usdgBandLowBps/HighBps`, `usdgMaxStale` are timelocked.
 
 ---
 

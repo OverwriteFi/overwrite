@@ -388,7 +388,7 @@ Primary — 60-minute Uniswap v3 TWAP anchored at expiry (§9.5, `window = 3600`
    with `√1.01 − 1` encoded as `4 987 562 / 1e9`; `swapNotionalUSDG` (250 000e6) and `impactBps` (100) are timelocked parameters; pool is the vault's immutable 0.05 % pool;
 2. sanity bound `|twapUSD / lastChainlink.answer − 1| ≤ weekendTwapBoundBps` where `lastChainlink` is the latest Chainlink answer at settle time (normally Friday's last 24/5 round) and `twapUSD` is the USD-converted TWAP of §9.5. **Global default 1 500 bps (15 %), overridable per vault by timelock within `[300, 1500]`** (founder decision D-017);
 3. the settle call happens at `now ≤ expiry + twapGrace` (**1 800 s**, founder decision) so the anchored window is still inside the observation buffer;
-4. the USDG/USD feed read is fresh and inside the 0.98–1.02 band (§9.5). Out of band → HALTED immediately, no fallback (D-015); stale → TWAP invalid, continue to the fallback below.
+4. the USDG/USD feed read is fresh (≤ 26 h) and inside the 0.98–1.02 band (§9.5). Stale or out of band → TWAP invalid, continue to the fallback below (D-015).
 Then `S = twapUSD`, `settlementPath = 2`.
 
 Fallback — first fresh Chainlink round after expiry. Keeper hint `roundId r`. Accept iff:
@@ -423,13 +423,14 @@ twapUSD8 = twapUSDG8 × usdgUsd.answer / 1e8
 ```
 Requirements on the USDG/USD read at the settle (or open) call:
 - `answer > 0` and `now − updatedAt ≤ 26 h`; if stale, the TWAP is **invalid** (the series falls through to the next path in §9.2/§9.3; a stale peg feed is not evidence of a depeg).
-- `0.98e8 ≤ answer ≤ 1.02e8`; if the answer is **outside the band, the weekend series is HALTED immediately** (§9.6), with no Chainlink fallback, because a ≥ 2 % USDG move is a systemic event for a protocol whose premium, escrow and bonds are in USDG. For a WEEKDAY series an out-of-band read makes the TWAP fallback invalid, which also leads to HALTED since it is the last path.
+- `0.98e8 ≤ answer ≤ 1.02e8`; if the answer is **outside the band, the TWAP is invalid** (founder decision D-015, revised): a USDG price more than 2 % from par makes a USDG-denominated pool an unreliable USD reference, so the series falls through to the next path exactly as for a stale read. For a WEEKEND series that is the first-fresh-Chainlink-round fallback of §9.3, which is USD-denominated and unaffected by USDG; for a WEEKDAY series the TWAP is already the last path, so the outcome is HALTED with `NO_ORACLE_PATH`.
+- `TwapRejected(seriesId, reason)` is emitted with `USDG_STALE` or `USDG_OUT_OF_BAND` so the keeper and frontend can show why the primary path was skipped.
 `usdgBandLowBps = 9800`, `usdgBandHighBps = 10200`, `usdgMaxStale = 26 h` are timelocked global parameters. The same converted TWAP is used for `S_ref` (§7.2) and `S_cap` (§12).
 
 Deploy-time action: call `pool.increaseObservationCardinalityNext(65535)` on every allowlisted pool (permissionless; cardinality 6000 today on NVDA/USDG). With 100 ms blocks and one observation per block that has a swap, 6 000 observations may cover only minutes during busy sessions; 65 535 is the v3 maximum. The keeper monitors coverage (`slot0.observationCardinality` and the oldest observation timestamp) every hour and alerts if the buffer would not cover `window + twapGrace`.
 
 ### 9.6 HALTED and resolution
-- `settle` reverts with a typed error until the keeper (or anyone) calls `halt(seriesId)` once all paths are provably exhausted on-chain (for WEEKDAY: no valid round and `now > expiry + twapGrace`; for WEEKEND: `now > expiry + 54 060`), or immediately for a WEEKEND series when the USDG/USD feed reads outside the 0.98–1.02 band at the call (`reason = USDG_DEPEG`, D-015). `halt` sets `state = HALTED`, calls `RiskModule.pauseNewAuctions(vaultId, reason)`, emits `SeriesHalted`. Reason codes: `NO_ORACLE_PATH`, `USDG_DEPEG`.
+- `settle` reverts with a typed error until the keeper (or anyone) calls `halt(seriesId)` once all paths are provably exhausted on-chain (for WEEKDAY: no valid round and `now > expiry + twapGrace`; for WEEKEND: `now > expiry + 54 060`). A USDG depeg alone never halts a weekend series; it only removes the TWAP path (§9.5). `halt` sets `state = HALTED`, calls `RiskModule.pauseNewAuctions(vaultId, reason)`, emits `SeriesHalted` with `reason = NO_ORACLE_PATH`.
 - `resolveHalted(seriesId, price8, bytes evidenceURI)` — timelock only (48 h public delay). Sets `settlementPrice = price8`, `settlementPath = 4`, finishes settlement exactly as `settle` would. Option holders and depositors can observe the proposal in the timelock before execution.
 - While a vault is halted: no new auctions; deposits blocked; queued redeems are executed at resolution; `claimPremium` and claims for previously settled series keep working.
 
@@ -532,7 +533,7 @@ Series / Auction
 - `AuctionCleared(*seriesId, clearingPrice, filledQty, premiumGross, fee)`, `BidFilled(*seriesId, *bidder, bidId, filledQty, refund)`
 - `AuctionSkipped(*seriesId)`
 - `SeriesSettled(*seriesId, settlementPrice, settlementPath, payoutPerOption, payoutTotal, oracleRoundId)`
-- `SeriesHalted(*seriesId, reason)`, `SeriesResolved(*seriesId, price, evidenceURI)`
+- `TwapRejected(*seriesId, reason)`, `SeriesHalted(*seriesId, reason)`, `SeriesResolved(*seriesId, price, evidenceURI)`
 - `OptionClaimed(*seriesId, *holder, qty, tokens)`
 Risk / admin
 - `Paused(*vaultId, what, *by)`, `Unpaused(*vaultId, what, *by)`
@@ -587,7 +588,7 @@ Frontend
 
 Resolved on 2026-09-02 (see DECISIONS.md D-009 to D-014): curator bond 10 000 USDG; relative strike grid 0.25 % with per-kind distance bounds and per-asset-class defaults; 100 % of unencumbered balance net of queued redeems written per series; TWAP liquidity rule (250 000 USDG swap < 1 % impact) and 30-minute grace; WRITE fee 20 % discount / 50 % burn; caps k = 5 with governance weights defaulting to an equal split and 25 000 USDG per vault pre-token; guardian is a hot key on the keeper server; option tokens freely transferable; points formula; testnet mocks + mainnet-fork tests.
 
-Closed on 2026-09-02 (D-015 to D-017): TWAPs are converted to USD with the USDG/USD feed and the weekend path halts on a USDG/USD read outside 0.98–1.02; `writePool` is a post-launch placeholder (`address(0)`); the weekend TWAP bound stays at 15 % globally, per-vault configurable.
+Closed on 2026-09-02 (D-015 to D-017): TWAPs are converted to USD with the USDG/USD feed, and a USDG/USD read that is stale or outside 0.98–1.02 invalidates the TWAP path only (the Chainlink fallback still runs); `writePool` is a post-launch placeholder (`address(0)`); the weekend TWAP bound stays at 15 % globally, per-vault configurable.
 
 No open questions remain for v0.1. New questions go here with an `OQ-` id and are closed with a DECISIONS.md entry.
 
