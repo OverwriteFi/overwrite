@@ -1,6 +1,6 @@
 # Overwrite Protocol — Engineering Specification
 
-Version 0.2 · 2026-09-02 · Status: draft for contract implementation. v0.2 applies the sixteen revisions RS-01…RS-16 from THREAT-MODEL.md, recorded as DECISIONS.md D-018…D-034 (RS-03 is folded into D-019; D-028 records the `KEEPER_ROLE` gate; D-034 records `sunset`).
+Version 0.3 · 2026-09-02 · Status: vault layer implemented (`contracts/src/CoveredCallVault.sol`, `OptionToken.sol`, `CapController.sol`), rest draft. v0.2 applied the sixteen revisions RS-01…RS-16 from THREAT-MODEL.md, recorded as DECISIONS.md D-018…D-034 (RS-03 is folded into D-019; D-028 records the `KEEPER_ROLE` gate; D-034 records `sunset`). v0.3 records what changed while implementing the vault (D-035…D-039): the vault ↔ AuctionHouse / SettlementOracle / OptionToken call graph (§3), explicit `encumbered` and saturating `totalAssets` (§4.1), premium accumulator precision 1e36 (§4.2), redeem escrow and `EXPIRED` deposit requests (§4.3), the split of the Series struct between vault and AuctionHouse (§6), vault-only option minting (§8.2 step 6), new events (§16.1), invariant I-16 (§17).
 Chain: Robinhood Chain mainnet (chainId 4663), testnet (chainId 46630)
 
 This document is the source of truth for contract, keeper, indexer and frontend work. Every chain fact carries a source URL or a `cast` read taken on 2026-09-02 (block 52502703, timestamp 1788344808) against the public RPC. Where a fact could not be verified it is listed in §19.
@@ -209,7 +209,24 @@ TimelockController (48h)  ── owner of everything below
 Keeper (off-chain, viem)    calls openAuction / clear / settle / processQueues
 ```
 
-Libraries: OpenZeppelin 5.1 (`ERC4626`, `ERC1155`, `TimelockController`, `AccessControl`, `ReentrancyGuard`, `SafeERC20`), Chainlink `AggregatorV3Interface`, Uniswap v3 `TickMath` / `FullMath` / `OracleLibrary`-equivalent (re-implemented under solc 0.8.26 without assembly beyond the audited library). No upgradeable proxies in v1; a v2 is a new deployment plus migration via `sunset` (§15, D-034). Every cross-contract reference is `immutable`.
+Libraries: OpenZeppelin 5.1 (`ERC4626`, `ERC1155`, `TimelockController`, `AccessControl`, `ReentrancyGuard`, `SafeERC20`), Chainlink `AggregatorV3Interface`, Uniswap v3 `TickMath` / `FullMath` / `OracleLibrary`-equivalent (re-implemented under solc 0.8.26 without assembly beyond the audited library). No upgradeable proxies in v1; a v2 is a new deployment plus migration via `sunset` (§15, D-034). Every cross-contract reference is `immutable` (one temporary exception: `CapController.priceSource`, D-039, §12).
+
+Vault call graph (implemented, v0.3). The vault is the only contract that holds stock tokens and the only minter/burner of option tokens (D-038). Every caller below is an `immutable` address fixed in the vault constructor.
+
+```
+AuctionHouse ──▶ vault.openSeries(kind, strike, expiry) → (seriesId, offeredQty)   IDLE → AUCTION; runs queued deposits first
+             ──▶ vault.skipSeries(seriesId)                                        AUCTION → IDLE (no valid bid)
+             ──▶ vault.mintSeries(seriesId, filledQty, premiumNet)                 AUCTION → LIVE; encumbers filledQty, pulls USDG premium; mints nothing
+             ──▶ vault.mintOptions(seriesId, bidder, qty)                          pull step of claimOptions; Σ qty ≤ filledQty; vault → OptionToken.mint
+SettlementOracle ──▶ vault.settleSeries(seriesId, price8, path)                    LIVE/HALTED → IDLE; bookkeeping only, no ERC-20 transfer; runs queues
+                 ──▶ vault.haltSeries(seriesId, reason)                            LIVE → HALTED
+OptionToken.claim(seriesId, qty, to) ──▶ burn ──▶ vault.payOptionClaim(seriesId, to, qty)   transfers qty × payoutPerOption / 1e18 stock tokens
+RiskModule       ◀── vault reads depositsPaused(vault) / auctionsPaused(vault) (views)
+CapController    ◀── vault reads remainingDepositAssets(vault, totalAssets) (view) ── reads IPriceSource.capPrice(vault)
+Timelock (owner) ──▶ vault.setSunset(), vault.setMaxQueueOps(); OptionToken.registerVault(underlying, vault); CapController setters
+```
+
+The vault performs none of the §5 schedule checks, §7.2 strike derivation, §8 bid logic or §9 oracle policy; it trusts `auctionHouse` and `settlement` for those and enforces only its own accounting (coverage, windows, state machine, D-026 multiplier check, pauses, sunset).
 
 ---
 
@@ -217,26 +234,28 @@ Libraries: OpenZeppelin 5.1 (`ERC4626`, `ERC1155`, `TimelockController`, `Access
 
 ### 4.1 Assets and shares
 - `asset()` = stock token. Shares are ERC-20 with the OZ `_decimalsOffset() = 6` virtual-share inflation guard.
-- `totalAssets() = asset.balanceOf(vault) − payoutOwed − withdrawalClaimable − queuedDepositTokens`
+- `totalAssets() = asset.balanceOf(vault) − payoutOwed − withdrawalClaimableTotal − queuedDepositTokens`, **saturating at 0** (only reachable if the issuer burns vault tokens, §2; views must never revert).
   - `payoutOwed`: stock tokens owed to option holders of settled series not yet claimed.
-  - `withdrawalClaimable`: stock tokens set aside for executed queued withdrawals.
-  - `queuedDepositTokens`: tokens transferred in by queued depositors that are not yet the vault's.
-- `maxDeposit/maxMint` = 0 outside a deposit window (§5) or when paused by guardian or when the cap is reached (§12). `maxWithdraw/maxRedeem` = 0 outside a withdrawal window; users queue instead (§4.3).
+  - `withdrawalClaimableTotal`: stock tokens set aside for executed queued withdrawals (per-account `withdrawalClaimable[a]`).
+  - `queuedDepositTokens`: tokens transferred in by queued depositors that are not yet the vault's (includes `EXPIRED` requests until cancelled, §4.3).
+- `encumbered` is tracked explicitly: `filledQty` of the LIVE or HALTED series, 0 in IDLE and AUCTION. `pendingRedeemAssets() = convertToAssets(escrowedRedeemShares)`. `freeAssets() = totalAssets() − encumbered − pendingRedeemAssets()`, saturating. `mintSeries` requires `filledQty ≤ offeredQty` and `filledQty ≤ freeAssets()` (I-1 re-check at clear).
+- `maxDeposit/maxMint` = 0 outside IDLE, when paused by guardian, when sunset, when the cap is reached or when no cap price is available (§12); `deposit/mint` revert with typed reasons (`VaultNotIdle`, `DepositsPaused`, `VaultSunsetted`, `CapPriceUnavailable`) before the ERC-4626 max check. `maxWithdraw/maxRedeem` = 0 outside IDLE regardless of any pause; users queue instead (§4.3).
 - `previewDeposit/previewRedeem` use `totalAssets()` above; they are exact inside windows because nothing is encumbered then.
+- Share `decimals() = 24` (`_decimalsOffset() = 6`, D-035). All state-changing entry points are `nonReentrant` (stock tokens are upgradable beacons, THREAT-MODEL T-11.4).
 
 ### 4.2 Premium accumulator (USDG, outside NAV)
 Premium is never converted into stock tokens in v1 (founder decision, D-004).
-- State: `accPremiumPerShare` (USDG × 1e18 / share), `premiumDebt[account]`, `premiumClaimable[account]`.
-- On `clear()` for a series of this vault: `accPremiumPerShare += premiumNet × 1e18 / totalSupply()` where `premiumNet = premiumGross − fee`.
-- `_update(from, to, value)` (share transfer/mint/burn hook) settles both parties: `premiumClaimable[a] += balance[a] × accPremiumPerShare / 1e18 − premiumDebt[a]; premiumDebt[a] = newBalance[a] × accPremiumPerShare / 1e18`.
+- State: `accPremiumPerShare` (USDG × **1e36** / share; 1e18 would truncate up to 1 USDG per token-worth of 24-decimal shares, D-035), `premiumDebt[account]`, `premiumClaimable[account]`.
+- On `mintSeries` (the clear) for a series of this vault: `accPremiumPerShare += premiumNet × 1e36 / (totalSupply() − balanceOf(vault))` where `premiumNet = premiumGross − fee` and `balanceOf(vault)` is the shares escrowed by queued redeems (D-036, §4.3). Reverts `NoSharesForPremium` if the denominator is 0 (only possible when every share is escrowed and only rounding dust is free).
+- `_update(from, to, value)` (share transfer/mint/burn hook) settles both parties, skipping `address(0)` and the vault itself: `premiumClaimable[a] += balance[a] × accPremiumPerShare / 1e36 − premiumDebt[a]; premiumDebt[a] = newBalance[a] × accPremiumPerShare / 1e36` (all products via `mulDiv`).
 - `claimPremium(address to) → uint256 usdg` transfers `premiumClaimable[msg.sender]`. Always callable, including while paused or halted.
 - Shares that existed at clearing earn the premium; shares minted later do not. Because deposits are impossible between auction open and settlement (§5), this equals "premium goes to whoever was in the vault when the calls were sold".
 
 ### 4.3 Deposit and withdrawal windows and queues
 - Direct `deposit/mint/withdraw/redeem` are allowed only when `vault.state == IDLE` (between a settlement and the next `openAuction`).
 - Queues (`requestDeposit` is allowed in **any** state, D-032):
-  - `requestDeposit(assets, receiver)`: allowed in any vault state, including IDLE. Transfers tokens in, records `(assets, receiver)` in the deposit queue, increments `queuedDepositTokens`. Executed by anyone via `processDeposits(n)` **whenever the vault is IDLE** (the share price is constant inside IDLE, invariant I-8, so a request made in IDLE executes at the current price; a request made during AUCTION/LIVE/HALTED executes at the post-settlement price of the next IDLE). Cancellable by the requester while still queued.
-  - `requestRedeem(shares, receiver)`: allowed outside IDLE (in IDLE use `redeem`). Locks the shares (non-transferable), records the request. Executed via `processRedeems(n)` after the next settlement: shares burned at the post-settlement rate, tokens moved to `withdrawalClaimable`, then `claimWithdrawal()`. Cancellable while queued.
+  - `requestDeposit(assets, receiver)`: allowed in any vault state, including IDLE (reverts only when sunset or deposits are paused). Transfers tokens in, records `(requester, receiver, assets)` in the deposit queue, increments `queuedDepositTokens`. Executed by anyone via `processDeposits(n)` **whenever the vault is IDLE** (the share price is constant inside IDLE, invariant I-8, so a request made in IDLE executes at the current price; a request made during AUCTION/LIVE/HALTED executes at the post-settlement price of the next IDLE). Cancellable by the requester while `QUEUED` or `EXPIRED`. Processing walks the FIFO: a request larger than the remaining cap is marked **`EXPIRED`** (tokens refundable via `cancelDeposit`) and processing continues, so one oversized request never blocks the queue (D-037); processing stops without expiring anything when no cap price is available, deposits are paused or the vault is sunset.
+  - `requestRedeem(shares, receiver)`: allowed outside IDLE (in IDLE use `redeem`). **Escrows the shares in the vault contract** (`balanceOf(vault) == escrowedRedeemShares`, D-036), which makes them non-transferable; escrowed shares earn no premium and are excluded from the premium denominator (§4.2). A request filed during the 15-minute AUCTION window is still inside `offeredQty` and therefore bears the series outcome without earning its premium; cancel before the clear to avoid that. Executed via `processRedeems(n)` in the next IDLE: shares burned at the post-settlement rate, tokens moved to `withdrawalClaimable[receiver]`, then `claimWithdrawal(to)`. Cancellable while queued.
 - Queue processing is part of the settlement transaction up to `maxQueueOpsPerSettle` (default 50) and continues permissionlessly afterwards. `openAuction` first executes up to `maxQueueOpsPerOpen` (default 50) queued deposits and then opens **regardless of any remaining queue** (D-032, closes THREAT-MODEL T-18); tokens still queued at open are not in `totalAssets()`, are not in `offeredQty`, and execute at the next IDLE. Redeem requests still queued at open are excluded from `offeredQty` (§5) and stay unencumbered, so they can be executed at the next settlement regardless of the option outcome.
 - Queue execution is bookkeeping only: executing a queued deposit mints shares against tokens already in the vault; executing a queued redeem moves an amount from `totalAssets` into `withdrawalClaimable`. **`settle` performs no ERC-20 transfers** (THREAT-MODEL T-11): the only stock-token transfers out of a vault are `withdraw/redeem` in IDLE, `claimWithdrawal` and `OptionToken.claim`.
 - If the vault is paused by the guardian or a series is halted, queued redeems remain executable once every open series of the vault is settled or resolved (§15).
@@ -294,6 +313,9 @@ struct Series {
   uint256 multiplierAtOpen; // uiMultiplier() snapshot; enters the jump guard only (§9.1, D-025)
   OracleParams params;      // snapshot of the vault's oracle parameters at openAuction (D-031); immutable for the life of the series
 }
+```
+Storage split (v0.3). The vault stores the accounting subset as `VaultSeries {kind, state, settlementPath, expiry, strike, offeredQty, filledQty, mintedQty, claimedQty, settlementPrice, payoutPerOption, multiplierAtOpen}` keyed by `seriesId`; `OptionToken` stores `SeriesInfo {vault, underlying, kind, settled, expiry, strike, settlementPrice, payoutPerOption, multiplierAtCreation}` per ERC-1155 id (id == seriesId, allocated by `OptionToken.create` from an incrementing counter starting at 1); the AuctionHouse stores the auction fields (`vaultId, auctionOpen, auctionClose, sRef, clearingPrice, reservePrice, params`). `SeriesState.RESOLVED` is set by the vault when `settlementPath ∈ {4, 5}`.
+```
 struct OracleParams {       // copied from the vault's timelocked configuration at openAuction
   uint32  weekdayMaxStale;          // s, §9.2
   uint32  twapGrace;                // s, §9.3
@@ -365,7 +387,7 @@ Open-bid, sealed nothing: bids are public on-chain the moment they are placed.
 3. `clearingPrice` = price of the last bid that received any fill. If only one bid exists, it clears at its own price (one valid bid ≥ reserve is enough, founder decision).
 4. Marginal price tie: if several bids share the clearing price and the remaining quantity is smaller than their total, fill them pro-rata by qty (floor), assigning the rounding dust to the earliest `bidId`.
 5. Every filled bidder pays `filledQty × clearingPrice / 1e18`. **Refunds are pull-based (D-023, closes T-07.3 and T-12.4):** `clear` credits `refundable[bidder] += escrow − payment` (unfilled bids: the whole escrow) and emits `RefundCredited`; bidders call `withdrawRefund(to)` at any time. `clear` performs **no outbound USDG transfer** and can therefore not be reverted by a frozen or paused USDG address.
-6. **Option allocation is pull-based (D-024, closes T-07.4 and T-16):** `clear` records `claimableOptions[seriesId][bidder] += filledQty` and emits `OptionsAllocated`; the bidder calls `claimOptions(seriesId, to)` which mints `OptionToken(seriesId, qty)` to `to`. No ERC-1155 receiver callback runs inside `clear`. An unclaimed allocation is still an option: `OptionToken.claim` (§9.7) accepts either minted tokens or an unminted allocation, so a bidder that never pulls its tokens still receives its payout. Option tokens are standard, freely transferable ERC-1155 (founder decision D-012); whoever holds them at claim time receives the payout. Unfilled offered quantity is simply never allocated (the "burned" quantity in the product description); `offeredQty − filledQty` tokens stay unencumbered.
+6. **Option allocation is pull-based (D-024, closes T-07.4 and T-16):** `clear` records `claimableOptions[seriesId][bidder] += filledQty` and emits `OptionsAllocated`; the bidder calls `claimOptions(seriesId, to)` which calls `vault.mintOptions(seriesId, to, qty)`; only the vault mints (D-038) and it bounds cumulative mints by `filledQty`. No ERC-1155 receiver callback runs inside `clear`. An unclaimed allocation is still an option: `OptionToken.claim` (§9.7) accepts either minted tokens or an unminted allocation, so a bidder that never pulls its tokens still receives its payout. Option tokens are standard, freely transferable ERC-1155 (founder decision D-012); whoever holds them at claim time receives the payout. Unfilled offered quantity is simply never allocated (the "burned" quantity in the product description); `offeredQty − filledQty` tokens stay unencumbered.
 7. Premium credited (§4.2) and fee credited to `FeeRouter` as an internal balance (§11; the forwarding transfer to treasury is a separate permissionless `FeeRouter.flush`, so it can never revert `clear`). Series → LIVE. Coverage: `filledQty ≤ totalAssets()` re-checked (I-1). Bond locks of unfilled bidders released (§8.1).
 8. If no bids: series → SKIPPED, vault → IDLE, `AuctionSkipped` emitted, all bond locks released, all escrow credited to `refundable`.
 
@@ -512,7 +534,7 @@ Rejected alternative, recorded for completeness: if `K` were defined per underly
 ## 12. Caps (CapController)
 
 - `capMode ∈ {FIXED, SAFETY_MODULE}`; global switch by timelock. Both paths exist from day one.
-- `FIXED`: `capUSD[vaultId]` in 6-dec USD, set per vault by timelock (curator proposes). **Launch value 25 000 USDG per vault** (founder decision D-011). Deposit check: `(totalAssets() + assets) × S_cap / 1e18 ≤ capUSD × 1e2` where `S_cap` = Chainlink latest answer if < 80 h old, else the 30-min TWAP; if neither is available, deposits revert (`CapPriceUnavailable`). Queued deposits are checked at execution, not at request.
+- `FIXED`: `capUSD[vaultId]` in 6-dec USD, set per vault by timelock (curator proposes). **Launch value 25 000 USDG per vault** (founder decision D-011). Deposit check: `(totalAssets() + assets) × S_cap / 1e18 ≤ capUSD × 1e2` where `S_cap` = Chainlink latest answer if < 80 h old, else the 30-min TWAP; if neither is available, deposits revert (`CapPriceUnavailable`). Queued deposits are checked at execution, not at request. Implemented as `CapController.remainingDepositAssets(vault, totalAssets) → (assets, priceOk)`: the used-USD term rounds **up** so the cap can never be exceeded by dust (fuzz-tested); `S_cap` comes from an `IPriceSource` implemented by `SettlementOracle` (settable by timelock until then, D-039).
 - `SAFETY_MODULE`: `globalCapUSD = k × safetyModuleValueUSD`, `k` default 5 (WAD-scaled, bound `[1, 20]`), `safetyModuleValueUSD = SafetyModule.totalStaked() × WRITE/USDG TWAP (30 min)`. Per-vault cap = `globalCapUSD × capWeightBps[vaultId] / 1e4`, weights set by timelock (governance), `Σ weights ≤ 1e4`; **default at switch-over is an equal split** `floor(1e4 / activeVaults)` across active vaults (founder decision D-011). A vault may also keep a `capUSD` ceiling under this mode (`min` of both).
 - Caps limit deposits only; they never force withdrawals.
 
@@ -559,11 +581,14 @@ Rejected alternative, recorded for completeness: if `K` were defined per underly
 ### 16.1 Events (indexed fields marked `*`)
 Vault
 - `Deposit(*sender, *owner, assets, shares)`, `Withdraw(*sender, *receiver, *owner, assets, shares)` (ERC-4626)
-- `DepositQueued(*receiver, *requestId, assets)`, `DepositQueueCancelled(*requestId)`, `DepositExecuted(*requestId, shares, sharePrice)`
-- `RedeemQueued(*owner, *requestId, shares)`, `RedeemQueueCancelled(*requestId)`, `RedeemExecuted(*requestId, assets)`, `WithdrawalClaimed(*owner, assets)`
+- `DepositQueued(*receiver, *requestId, assets)`, `DepositQueueCancelled(*requestId)`, `DepositRequestExpired(*requestId)`, `DepositExecuted(*requestId, shares, sharePrice)`
+- `RedeemQueued(*owner, *requestId, shares)`, `RedeemQueueCancelled(*requestId)`, `RedeemExecuted(*requestId, assets)`, `WithdrawalClaimed(*owner, *to, assets)`
 - `PremiumAccrued(*seriesId, premiumNet, accPremiumPerShare)`, `PremiumClaimed(*account, *to, usdg)`
-- `VaultStateChanged(*vaultId, from, to)`, `VaultSunset(*vaultId)`
-- `ShortfallRecorded(*vaultId, *seriesId, tokensShort)`, `CoverageInjected(*seriesId, tokens)`
+- `VaultStateChanged(from, to)`, `VaultSunset()` (one contract per vault, so no `vaultId` field)
+- `SeriesOpened(*seriesId, kind, strike, expiry, offeredQty, multiplierAtOpen)`, `SeriesCleared(*seriesId, filledQty, premiumNet)`, `SeriesSkipped(*seriesId)`, `SeriesHalted(*seriesId, reason)`, `SeriesSettled(*seriesId, settlementPrice, settlementPath, payoutPerOption, payoutTotal)` (vault-side; the AuctionHouse emits the richer `AuctionOpened`/`AuctionCleared` below), `OptionsMinted(*seriesId, *to, qty)`, `OptionPaid(*seriesId, *to, qty, tokens)`
+- `ShortfallRecorded(*seriesId, tokensShort)`, `CoverageInjected(*seriesId, tokens)` (post-token, not yet implemented)
+OptionToken
+- `VaultRegistered(*underlying, *vault)`, `SeriesCreated(*id, *vault, *underlying, kind, strike, expiry, multiplierAtCreation)`, `SeriesSettled(*id, settlementPrice, payoutPerOption)`, `OptionClaimed(*seriesId, *holder, *to, qty, tokens)`
 Series / Auction
 - `AuctionOpened(*vaultId, *seriesId, kind, auctionOpen, auctionClose, expiry, sRef, strike, offeredQty, reservePrice, multiplierAtOpen)`
 - `BidPlaced(*seriesId, *bidder, bidId, qty, price, escrow)`
@@ -628,6 +653,9 @@ Frontend
 - **I-13 Bond locks**: an MM whose bid was filled in a series that is LIVE or HALTED has `activeLocks > 0` and `withdrawBond` reverts, regardless of its option-token balance.
 - **I-14 Liveness without keys**: from any HALTED series and any block ≥ `expiry + haltedTimeout`, there exists a permissionless call sequence (`resolveHaltedByOracle`, then queue processing) that returns the vault to IDLE whenever the feed has published any valid round after expiry.
 - **I-15 Sunset**: after `VaultSunset`, no `AuctionOpened` for that vault; `maxWithdraw` is never forced to 0 by any flag once the last series is settled.
+- **I-16 Encumbrance accounting**: `encumbered == Σ filledQty of LIVE/HALTED series` (at most one) and `encumbered ≤ totalAssets()`; `state == IDLE ⇒ encumbered == 0`; for every series `OptionToken.totalSupply(id) + claimedQty == mintedQty ≤ filledQty`; `balanceOf(vault) == escrowedRedeemShares`; `totalAssets + payoutOwed + withdrawalClaimableTotal + queuedDepositTokens == asset.balanceOf(vault)` absent issuer burns.
+
+Encoded so far (`contracts/test/invariants/VaultInvariants.t.sol`, stateful with `fail_on_revert`): I-1, I-2 (payout bound), I-3 (supply clause), I-4, I-8 (as "share price never decreases outside a paying settlement", the exact-constant form fails by rounding dust), I-16, plus the brief's I1–I4: encumbered ≤ balance, Σ share claims ≤ totalAssets, no encumbrance after settlement, zero-payout settlement never lowers the share price. I-6 (no stock `Transfer` inside `settle`) is a unit test with recorded logs. I-5, I-7, I-9…I-15 need AuctionHouse / SettlementOracle / RiskModule.
 
 ---
 
@@ -639,7 +667,7 @@ Closed on 2026-09-02 (D-015 to D-017): TWAPs are converted to USD with the USDG/
 
 Closed on 2026-09-02 (D-018 to D-034): all sixteen revisions from THREAT-MODEL.md §4 accepted: time-weighted TWAP liquidity, minimum observations in the window, beacon monitoring, deterministic bound reference, resolution band ±25 % with permissionless resolution after 7 days, pull-based refunds and option allocation, bond locks by participation, no series across a staged multiplier change, jump guard ±30 % vs `sRef`, curator floors on strike distance and reserve, second guardian key, `KEEPER_ROLE` on `openAuction`, parameter snapshot per series, `requestDeposit` in any state with execution at the next IDLE, `sunset`.
 
-Still open (not among the sixteen, THREAT-MODEL T-14): **OQ-001** whether a second cold key should hold `CANCELLER_ROLE` on the timelock (must not be the guardian). **OQ-002** measure the USDG/USD feed weekend cadence and the SPY/QQQ pool depth before choosing `usdgMaxStale` and creating the ETF vaults (THREAT-MODEL T-12.5, T-03). New questions go here with an `OQ-` id and are closed with a DECISIONS.md entry.
+Still open (not among the sixteen, THREAT-MODEL T-14): **OQ-001** whether a second cold key should hold `CANCELLER_ROLE` on the timelock (must not be the guardian). **OQ-002** measure the USDG/USD feed weekend cadence and the SPY/QQQ pool depth before choosing `usdgMaxStale` and creating the ETF vaults (THREAT-MODEL T-12.5, T-03). **OQ-003** freeze or redeploy `CapController.priceSource` once `SettlementOracle` exists (D-039). New questions go here with an `OQ-` id and are closed with a DECISIONS.md entry.
 
 ---
 

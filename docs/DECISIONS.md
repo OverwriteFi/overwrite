@@ -412,3 +412,61 @@ Format: ID · date · decision · alternatives considered · why · sources. New
 **Why.** THREAT-MODEL T-17. Migration is cheap here: single-asset ERC-4626 shares, no lock, weekly IDLE windows, 7-day bond cooldown.
 
 **Consequences.** SPEC §3, §15; event `VaultSunset`; invariant I-15; CI grep for proxy imports in `src/`.
+
+---
+
+## D-035 · 2026-09-02 · Inflation-attack guard is the OpenZeppelin virtual-share offset (6), not a burned seed deposit
+
+**Decision.** `CoveredCallVault` overrides `_decimalsOffset()` to return 6: every share computation uses `totalSupply + 1e6` virtual shares and `totalAssets + 1` virtual asset. Shares have 24 decimals. No dead-address deposit, no deployer seed transaction.
+
+**Alternatives considered.** (1) Minimum initial deposit burned to `address(0xdead)` (Uniswap v2 style). Rejected: needs a funded seed transaction per vault at deploy (nine vaults, stock tokens the deployer must first acquire), creates a privileged first depositor path in the factory, and the burned amount is a permanent, visible loss that a reviewer has to explain per vault. (2) Offset 3 (the OZ documentation example). Rejected: 1e3 still leaves a profitable attack against a small first depositor at a 25 000 USDG cap. (3) Requiring `shares > 0` on deposit. Not needed with offset 6 and would turn dust deposits into reverts.
+
+**Why.** THREAT-MODEL T-06. With offset 6 an attacker must donate 1e6 × the amount they hope to strand and receives back at most deposit + donation; the victim's loss is bounded by one share unit = donation / 1e6. Encoded as `testFuzz_inflationAttack_unprofitable` and `testFuzz_depositRedeemRoundTrip_neverProfits`. Cost: at most 1 wei of rounding per operation in the vault's favour.
+
+**Consequences.** SPEC §4.1 (unchanged text, now implemented); share `decimals() == 24`; premium accumulator precision raised to 1e36 (SPEC §4.2) because 24-decimal shares would otherwise truncate up to 1 USDG per token-worth of shares.
+
+---
+
+## D-036 · 2026-09-02 · Queued redeems escrow the shares in the vault; escrowed shares earn no premium
+
+**Decision.** `requestRedeem(shares, receiver)` transfers the shares to the vault contract itself. The vault's own balance is `escrowedRedeemShares`; it is skipped by the premium hook and excluded from the premium denominator at clearing: `accPremiumPerShare += premiumNet × 1e36 / (totalSupply − balanceOf(vault))`. `cancelRedeem` transfers them back; `processRedeems` burns them from the vault's balance.
+
+**Alternatives considered.** (1) Per-account `lockedShares` mapping checked in `_update`. Rejected: a second balance the ERC-20 transfer path must consult on every transfer, more storage, more ways to get the premium bookkeeping wrong. (2) Escrow but keep paying premium to escrowed shares via a per-request checkpoint. Rejected: requires a second accumulator per request for a 15-minute edge case.
+
+**Why.** Escrow makes locked shares non-transferable with zero extra bookkeeping and matches the ERC-7540 pattern. Premium exclusion is consistent with D-009: requests present at open are excluded from `offeredQty`, so those shares bear no option risk and should earn nothing. Edge case, documented in SPEC §4.3: a request filed inside the 15-minute AUCTION window (after `offeredQty` was fixed) still sits inside `offeredQty` if the clear fills it, so it bears the series outcome but forfeits the premium. Only the requester loses; nobody can profit from it; the requester can `cancelRedeem` before the clear.
+
+**Consequences.** SPEC §4.2, §4.3; `pendingRedeemAssets()` view; invariant `balanceOf(vault) == escrowedRedeemShares`; test `test_premium_escrowedRedeemSharesExcluded`.
+
+---
+
+## D-037 · 2026-09-02 · A queued deposit that no longer fits the cap at execution is EXPIRED and refundable; the FIFO never blocks
+
+**Decision.** `processDeposits` walks the FIFO. A request larger than the remaining cap is marked `EXPIRED`, its tokens stay counted in `queuedDepositTokens`, and the requester reclaims them with `cancelDeposit`. Processing continues with the next request. Processing stops (without expiring anything) when no cap price is available, deposits are paused or the vault is sunset. No ERC-20 transfer happens inside processing.
+
+**Alternatives considered.** (1) Stop at the first request that does not fit. Rejected: one large request blocks every later one until its owner acts (griefing for the cost of gas, same shape as T-18). (2) Partial fill up to the cap. Rejected: leaves a remainder request and a second share price for the same request; more state for little value at a 25 000 USDG cap. (3) Refund by transfer inside processing. Rejected: T-11 (settle performs no transfers; a paused or blocked token would revert settlement).
+
+**Consequences.** SPEC §4.3; status enum `{QUEUED, EXECUTED, CANCELLED, EXPIRED}`; event `DepositRequestExpired`.
+
+---
+
+## D-038 · 2026-09-02 · Only the vault mints and burns option tokens; `mintOptions` is the AuctionHouse's pull step
+
+**Decision.** `OptionToken.create/mint/burn/markSettled` are callable only by the vault registered for the underlying (`registerVault`, one per underlying, irreversible, timelock-owned). `mintSeries` (at clear) only encumbers `filledQty` and pulls premium; it mints nothing. `AuctionHouse.claimOptions` calls `vault.mintOptions(seriesId, bidder, qty)` with cumulative mints bounded by `filledQty`. `OptionToken.claim` burns and calls `vault.payOptionClaim`, which transfers the stock-token payout directly from the vault.
+
+**Alternatives considered.** Granting the AuctionHouse a mint role on `OptionToken`. Rejected: two minters for one supply; the coverage bound `Σ minted ≤ filledQty` would live outside the contract that owns the encumbrance.
+
+**Why.** Keeps D-024 (no ERC-1155 mint inside `clear`) and puts the only supply bound next to the only encumbrance bound, so invariant I-3 (`totalSupply + claimed == minted ≤ filled`) is checked in one place.
+
+**Consequences.** SPEC §3 call graph, §8.2 step 6 wording, §9.7; the unminted-allocation claim of §8.2 is implemented in AuctionHouse as `mintOptions` followed by `claim` in one transaction.
+
+---
+
+## D-039 · 2026-09-02 · `CapController.priceSource` is settable by the timelock until SettlementOracle ships
+
+**Decision.** `CapController` reads `S_cap` through an `IPriceSource` reference that the timelock can change. Everything else in the vault layer is `immutable`.
+
+**Alternatives considered.** Making it immutable now and redeploying `CapController` when `SettlementOracle` exists. Rejected: the vault's `capController` reference is immutable, so that redeploy would force a vault redeploy too.
+
+**Why.** Temporary exception to the "every cross-contract reference is immutable" rule of SPEC §3, confined to a contract that holds no funds and can only lower or raise deposit headroom. To be revisited: once `SettlementOracle` is deployed, either freeze the setter (one-way `freezePriceSource`) or redeploy before mainnet.
+
+**Consequences.** SPEC §12 note; OQ-003 in SPEC §18.
