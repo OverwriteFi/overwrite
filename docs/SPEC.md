@@ -1,6 +1,6 @@
 # Overwrite Protocol — Engineering Specification
 
-Version 0.1 · 2026-09-02 · Status: draft for contract implementation
+Version 0.2 · 2026-09-02 · Status: draft for contract implementation. v0.2 applies the sixteen revisions RS-01…RS-16 from THREAT-MODEL.md, recorded as DECISIONS.md D-018…D-034 (RS-03 is folded into D-019; D-028 records the `KEEPER_ROLE` gate; D-034 records `sunset`).
 Chain: Robinhood Chain mainnet (chainId 4663), testnet (chainId 46630)
 
 This document is the source of truth for contract, keeper, indexer and frontend work. Every chain fact carries a source URL or a `cast` read taken on 2026-09-02 (block 52502703, timestamp 1788344808) against the public RPC. Where a fact could not be verified it is listed in §19.
@@ -184,8 +184,8 @@ Regular session 09:30–16:00 ET. 2026 holidays falling on a Friday: Apr 3 (Good
 | Depositor | deposits stock tokens into a vault, receives ERC-4626 shares, earns USDG premium, bears the capped upside | untrusted |
 | Curator | posts the curator bond, creates a vault for one stock token, sets vault parameters within protocol bounds, optionally prefunds WRITE for fee mode | semi-trusted; bonded; parameters bounded and timelocked |
 | Market maker (MM) | posts the MM bond, signs the off-chain non-US-person attestation, bids USDG in auctions, receives option tokens, claims settlement in stock tokens | untrusted on-chain; bids fully escrowed |
-| Keeper | off-chain bot; opens/clears auctions, submits settlement with round/TWAP hints, processes queues. Cannot choose prices: every number it supplies is verified on-chain | untrusted for safety, trusted for liveness only |
-| Guardian | separate key; can only pause new auctions and new deposits | limited |
+| Keeper | off-chain bot holding `KEEPER_ROLE`; the only caller of `openAuction` (D-028). Clears auctions, submits settlement with round/TWAP hints, processes queues (all of those are permissionless). Cannot choose prices: every number it supplies is bounded or verified on-chain | untrusted for safety, trusted for liveness only |
+| Guardian | two keys hold `GUARDIAN_ROLE`: a hot key on the keeper server and an off-server key held by the founder (D-029); can only pause new auctions and new deposits, and unpause | limited |
 | Admin | one hardware-wallet EOA that is sole proposer and executor of a 48 h `TimelockController`; no multisig (founder decision, DECISIONS.md D-003) | privileged, delayed, public |
 | Deployer | deploys, wires roles, renounces everything | one-shot |
 | Issuer (Robinhood) | external: can pause tokens, pause the oracle, block addresses, burn any balance, upgrade all tokens via the beacon (§1.2). Accepted, disclosed risk | external, not controllable |
@@ -197,11 +197,11 @@ Regular session 09:30–16:00 ET. 2026 holidays falling on a Friday: Apr 3 (Good
 ```
 TimelockController (48h)  ── owner of everything below
  ├─ VaultFactory            creates CoveredCallVault + Series storage per stock token (allowlist hardcoded)
- ├─ CoveredCallVault[i]     ERC-4626 (asset = stock token); accounting, windows, queues, premium accumulator
- ├─ AuctionHouse            bids, escrow, clearing (one instance, keyed by seriesId)
- ├─ OptionToken             ERC-1155, id = seriesId; freely transferable (D-012); minted at clearing, burned to claim
- ├─ SettlementOracle        Chainlink + Uniswap v3 TWAP policy (§9); pure view + one settle entry
- ├─ RiskModule              pause state, halt registry, guardian role
+ ├─ CoveredCallVault[i]     ERC-4626 (asset = stock token); accounting, windows, queues, premium accumulator, sunset flag (§15)
+ ├─ AuctionHouse            bids, escrow, clearing; pull-based refunds and option allocation (§8.2, D-023/D-024)
+ ├─ OptionToken             ERC-1155, id = seriesId; freely transferable (D-012); minted when the winning bidder pulls its allocation, burned to claim
+ ├─ SettlementOracle        Chainlink + Uniswap v3 TWAP policy (§9); pure view + settle / halt / resolve entries
+ ├─ RiskModule              pause state, halt registry, guardian role (two holders)
  ├─ FeeRouter               performance fee in USDG or WRITE
  ├─ BondManager             curator and MM bonds (USDG now, WRITE later)
  ├─ CapController           fixed caps now, k × safety-module value later
@@ -209,7 +209,7 @@ TimelockController (48h)  ── owner of everything below
 Keeper (off-chain, viem)    calls openAuction / clear / settle / processQueues
 ```
 
-Libraries: OpenZeppelin 5.1 (`ERC4626`, `ERC1155`, `TimelockController`, `AccessControl`, `ReentrancyGuard`, `SafeERC20`), Chainlink `AggregatorV3Interface`, Uniswap v3 `TickMath` / `FullMath` / `OracleLibrary`-equivalent (re-implemented under solc 0.8.26 without assembly beyond the audited library). No upgradeable proxies in v1; a v2 is a new deployment plus migration.
+Libraries: OpenZeppelin 5.1 (`ERC4626`, `ERC1155`, `TimelockController`, `AccessControl`, `ReentrancyGuard`, `SafeERC20`), Chainlink `AggregatorV3Interface`, Uniswap v3 `TickMath` / `FullMath` / `OracleLibrary`-equivalent (re-implemented under solc 0.8.26 without assembly beyond the audited library). No upgradeable proxies in v1; a v2 is a new deployment plus migration via `sunset` (§15, D-034). Every cross-contract reference is `immutable`.
 
 ---
 
@@ -234,10 +234,11 @@ Premium is never converted into stock tokens in v1 (founder decision, D-004).
 
 ### 4.3 Deposit and withdrawal windows and queues
 - Direct `deposit/mint/withdraw/redeem` are allowed only when `vault.state == IDLE` (between a settlement and the next `openAuction`).
-- Outside IDLE:
-  - `requestDeposit(assets, receiver)`: transfers tokens in, records `(assets, receiver)` in the deposit queue, increments `queuedDepositTokens`. Executed by anyone via `processDeposits(n)` after the next settlement, at the post-settlement share price. Cancellable by the requester while still queued.
-  - `requestRedeem(shares, receiver)`: locks the shares (non-transferable), records the request. Executed via `processRedeems(n)` after the next settlement: shares burned at the post-settlement rate, tokens moved to `withdrawalClaimable`, then `claimWithdrawal()`. Cancellable while queued.
-- Queue processing is part of the settlement transaction up to `maxQueueOpsPerSettle` (default 50) and continues permissionlessly afterwards; `openAuction` requires the deposit queue to be empty for that vault. Redeem requests still queued at open are excluded from `offeredQty` (§5) and stay unencumbered, so they can be executed at the next settlement regardless of the option outcome.
+- Queues (`requestDeposit` is allowed in **any** state, D-032):
+  - `requestDeposit(assets, receiver)`: allowed in any vault state, including IDLE. Transfers tokens in, records `(assets, receiver)` in the deposit queue, increments `queuedDepositTokens`. Executed by anyone via `processDeposits(n)` **whenever the vault is IDLE** (the share price is constant inside IDLE, invariant I-8, so a request made in IDLE executes at the current price; a request made during AUCTION/LIVE/HALTED executes at the post-settlement price of the next IDLE). Cancellable by the requester while still queued.
+  - `requestRedeem(shares, receiver)`: allowed outside IDLE (in IDLE use `redeem`). Locks the shares (non-transferable), records the request. Executed via `processRedeems(n)` after the next settlement: shares burned at the post-settlement rate, tokens moved to `withdrawalClaimable`, then `claimWithdrawal()`. Cancellable while queued.
+- Queue processing is part of the settlement transaction up to `maxQueueOpsPerSettle` (default 50) and continues permissionlessly afterwards. `openAuction` first executes up to `maxQueueOpsPerOpen` (default 50) queued deposits and then opens **regardless of any remaining queue** (D-032, closes THREAT-MODEL T-18); tokens still queued at open are not in `totalAssets()`, are not in `offeredQty`, and execute at the next IDLE. Redeem requests still queued at open are excluded from `offeredQty` (§5) and stay unencumbered, so they can be executed at the next settlement regardless of the option outcome.
+- Queue execution is bookkeeping only: executing a queued deposit mints shares against tokens already in the vault; executing a queued redeem moves an amount from `totalAssets` into `withdrawalClaimable`. **`settle` performs no ERC-20 transfers** (THREAT-MODEL T-11): the only stock-token transfers out of a vault are `withdraw/redeem` in IDLE, `claimWithdrawal` and `OptionToken.claim`.
 - If the vault is paused by the guardian or a series is halted, queued redeems remain executable once every open series of the vault is settled or resolved (§15).
 
 ### 4.4 State machine (per vault)
@@ -256,8 +257,8 @@ All times UTC. The keeper supplies `expiry` and `auctionOpen` timestamps; the co
 
 | Step | When | What |
 |---|---|---|
-| (a) Weekday auction opens | Monday 14:00:00, duration 900 s (14:00–14:15). Contract check: `auctionOpen mod 604800 == 14:00 Monday` ± `openTolerance` (default 7 200 s to survive a late Sunday settlement, §9.4); vault state IDLE; deposit queue empty | `openAuction(vaultId, SeriesKind.WEEKDAY, expiry, strikeDistanceBps, reservePriceUSDG)`; contract reads `S_ref` (§7.2), computes the strike, and sets `offeredQty = totalAssets() − pendingRedeemAssets` where `pendingRedeemAssets = convertToAssets(Σ queued redeem shares)` (100 % of the unencumbered balance net of queued withdrawals, founder decision D-009). Queued redeems therefore do not need an empty queue at open |
-| (b) Clearing | at or after `auctionClose` | `clear(seriesId)` (§8). Options minted, premium credited (§4.2), fee routed (§11). If no bid is ≥ reserve, series is `SKIPPED`, vault returns to IDLE |
+| (a) Weekday auction opens | Monday 14:00:00, duration 900 s (14:00–14:15). Contract check: caller has `KEEPER_ROLE` (D-028); `auctionOpen mod 604800 == 14:00 Monday` ± `openTolerance` (default 7 200 s to survive a late Sunday settlement, §9.4); vault state IDLE and not sunset (§15); `token.oraclePaused() == false`; no staged multiplier change inside the series: `token.effectiveAt() == 0 || effectiveAt > expiry` (D-026); `strikeDistanceBps ≥ max(protocol bound, curator floor)` (D-027) | `openAuction(vaultId, SeriesKind.WEEKDAY, expiry, strikeDistanceBps, reservePriceUSDG)`; contract executes up to `maxQueueOpsPerOpen` queued deposits (§4.3), reads `S_ref` (§7.2), computes the strike, snapshots the vault's oracle parameters into the series (§6, D-031), and sets `offeredQty = totalAssets() − pendingRedeemAssets` where `pendingRedeemAssets = convertToAssets(Σ queued redeem shares)` (100 % of the unencumbered balance net of queued withdrawals, founder decision D-009). Neither queue needs to be empty at open |
+| (b) Clearing | at or after `auctionClose` | `clear(seriesId)` (§8). Option allocations and refunds recorded for pull (§8.2), premium credited (§4.2), fee credited (§11). If no bid is ≥ reserve, series is `SKIPPED`, vault returns to IDLE |
 | (c) Weekday settlement | `expiry` = Friday 16:00 ET (20:00 or 21:00 UTC). Settlement callable from `expiry` | `settle(seriesId, hint)` (§9.2). Queues processed |
 | (d) Weekend auction | opens at `weekdayExpiry + 600 s`, duration 900 s. Requires the weekday series settled (or skipped) | `openAuction(vaultId, SeriesKind.WEEKEND, expiry = Sunday 23:59:00 UTC, …)` |
 | (e) Weekend settlement | from Sunday 23:59:00 UTC | `settle(seriesId, hint)` (§9.3). Queues processed |
@@ -265,7 +266,7 @@ All times UTC. The keeper supplies `expiry` and `auctionOpen` timestamps; the co
 
 Fixed-timestamp rule (founder decision): expiry timestamps do not move for NYSE holidays or early closes. On a Friday holiday the settlement price is the Chainlink round last published before `expiry` (the feed holds Thursday's last 24/5 price); on an early-close day the 24/5 feed still updates in the post-market session until 17:00 ET, so the 16:00 ET price is a post-market price. Both are documented on the frontend.
 
-Skipped week: if the weekday auction cannot open within `openTolerance` of Monday 14:00 (e.g. the weekend series is unsettled until the Monday 15:00 deadline of §9.3), the keeper calls nothing; the vault stays IDLE (windows open) and the next event is the Friday weekend auction, which is allowed to open standalone at Friday `expiry + 600 s` when there is no live weekday series.
+Skipped week: if the weekday auction cannot open within `openTolerance` of Monday 14:00 (e.g. the weekend series is unsettled until the Monday 15:00 deadline of §9.3, or a staged multiplier change falls inside the week), the keeper calls nothing; the vault stays IDLE (windows open) and the next event is the Friday weekend auction, which is allowed to open standalone at Friday `expiry + 600 s` when there is no live weekday series.
 
 ---
 
@@ -288,11 +289,28 @@ struct Series {
   uint128 clearingPrice;    // USDG (6 dec) per option
   uint128 reservePrice;     // USDG per option
   uint128 settlementPrice;  // USD 8 dec, 0 until settled
-  uint8   settlementPath;   // 1 = Chainlink at/before expiry, 2 = TWAP, 3 = Chainlink first-after-expiry, 4 = resolved by timelock
+  uint8   settlementPath;   // 1 = Chainlink at/before expiry, 2 = TWAP, 3 = Chainlink first-after-expiry, 4 = resolved by timelock, 5 = resolved permissionlessly after haltedTimeout
   uint128 payoutPerOption;  // raw token units per option (≤ 1e18)
-  uint256 multiplierAtOpen; // uiMultiplier() snapshot, informational
+  uint256 multiplierAtOpen; // uiMultiplier() snapshot; enters the jump guard only (§9.1, D-025)
+  OracleParams params;      // snapshot of the vault's oracle parameters at openAuction (D-031); immutable for the life of the series
+}
+struct OracleParams {       // copied from the vault's timelocked configuration at openAuction
+  uint32  weekdayMaxStale;          // s, §9.2
+  uint32  twapGrace;                // s, §9.3
+  uint16  weekendTwapBoundBps;      // §9.3
+  uint16  weekdayTwapBoundBps;      // §9.2 (300)
+  uint128 swapNotionalUSDG;         // §9.3
+  uint16  impactBps;                // §9.3
+  uint8   minObservationsInWindow;  // §9.5, D-019
+  uint16  jumpBps;                  // §9.1, D-025 (3000)
+  address sequencerFeed;            // §9.1
+  uint32  sequencerGrace;           // §9.1
+  uint16  usdgBandLowBps;           // §9.5
+  uint16  usdgBandHighBps;
+  uint32  usdgMaxStale;
 }
 ```
+A parameter change executed by the timelock applies only to series opened after execution. Because every vault is IDLE for at least the Sunday→Monday window between any two series, depositors always have a withdrawal window between seeing a queued parameter change and the first series it governs (THREAT-MODEL T-14).
 
 ---
 
@@ -315,7 +333,9 @@ K_raw  = S_ref × (1e4 + strikeDistanceBps) / 1e4
 K      = ceilDiv(K_raw, grid) × grid                       // round UP to the grid (further OTM)
 ```
 - The grid is relative, so strikes land on multiples of 0.25 % of the reference spot, not on fixed dollar levels. Rounding up can add at most one grid step (0.25 %) to the requested distance.
-- `strikeDistanceBps` is supplied by the keeper and must lie within protocol bounds per series kind: **WEEKDAY 300–1500 bps, WEEKEND 100–1000 bps** (founder decision). Keeper defaults per asset class: `SINGLE_NAME` 800 / 500 bps, `ETF` 200 / 100 bps (weekday / weekend). The defaults are keeper configuration, not contract state; the contract enforces only the bounds.
+- `strikeDistanceBps` is supplied by the keeper and must lie within protocol bounds per series kind: **WEEKDAY 300–1500 bps, WEEKEND 100–1000 bps** (founder decision). Keeper defaults per asset class: `SINGLE_NAME` 800 / 500 bps, `ETF` 200 / 100 bps (weekday / weekend). The defaults are keeper configuration, not contract state. The contract enforces the protocol bounds **and a per-vault curator floor** `minStrikeDistanceBps[kind]` (D-027, closes THREAT-MODEL T-13/T-19): the floor defaults to the protocol lower bound and the curator may raise it, within the protocol bounds, via the timelock. A keeper can therefore never sell closer to the money than the curator allows.
+- `openAuction` reverts with `MultiplierChangeInsideSeries` if `token.effectiveAt() != 0 && token.effectiveAt() ≤ expiry` (D-026, closes T-10): a staged corporate action inside the series skips that series.
+- `openAuction` is callable only by `KEEPER_ROLE` (D-028). Everything else in the lifecycle is permissionless.
 - `S_ref` is read on-chain, never keeper-supplied:
   1. Chainlink `latestRoundData()` if `answer > 0`, `updatedAt ≥ now − 26 h`, `oraclePaused() == false`; else
   2. 30-minute TWAP (§9.5) if `|TWAP / lastChainlinkAnswer − 1| ≤ 15 %` and the last Chainlink answer is ≤ 80 h old; else
@@ -333,7 +353,8 @@ Open-bid, sealed nothing: bids are public on-chain the moment they are placed.
 
 ### 8.1 Eligibility and bid placement
 - `bid(seriesId, qty, priceUSDG)` requires: `state == AUCTION`, `now < auctionClose`, `BondManager.hasActiveMMBond(msg.sender)`, `qty ≥ minBidQty` (default 1e17 = 0.1 option), `priceUSDG ≥ reservePrice`, bids per auction `< maxBids` (64), bids per bidder per auction ≤ 8.
-- Escrow: `qty × priceUSDG / 1e18` USDG transferred in with `safeTransferFrom` at bid time.
+- Escrow: `qty × priceUSDG / 1e18` USDG transferred in with `safeTransferFrom` at bid time. A bid that cannot fund its escrow reverts and is never stored; "bid then fail to pay" is impossible by construction.
+- Bond lock (D-030, closes T-07.6): the first bid of a bidder in a series calls `BondManager.lock(bidder, seriesId)`; the lock is released at `clear` if the bidder received no fill, otherwise when the series reaches SETTLED or RESOLVED. Locks are counted per bidder and are independent of option-token balances, so transferring option tokens away does not free the bond.
 - No cancellation; no amendment (a new bid is a new escrow). Bids below reserve revert rather than being stored.
 - A bidder's total `qty` across bids may exceed `offeredQty`; only the cleared portion is filled.
 
@@ -343,15 +364,15 @@ Open-bid, sealed nothing: bids are public on-chain the moment they are placed.
 2. Walk the sorted list, filling `min(bid.qty, remaining)` until `remaining == 0`.
 3. `clearingPrice` = price of the last bid that received any fill. If only one bid exists, it clears at its own price (one valid bid ≥ reserve is enough, founder decision).
 4. Marginal price tie: if several bids share the clearing price and the remaining quantity is smaller than their total, fill them pro-rata by qty (floor), assigning the rounding dust to the earliest `bidId`.
-5. Every filled bidder pays `filledQty × clearingPrice / 1e18`; the difference to escrow is refunded in the same transaction. Unfilled bids are fully refunded.
-6. `OptionToken.mint(bidder, seriesId, filledQty)` per filled bidder. Option tokens are standard, freely transferable ERC-1155 (founder decision D-012); whoever holds them at claim time receives the payout. Unfilled offered quantity is simply never minted (the "burned" quantity in the product description); `offeredQty − filledQty` tokens stay unencumbered.
-7. Premium and fee routed (§4.2, §11). Series → LIVE. Coverage: `filledQty ≤ totalAssets()` re-checked (I-1).
-8. If no bids: series → SKIPPED, vault → IDLE, `AuctionSkipped` emitted.
+5. Every filled bidder pays `filledQty × clearingPrice / 1e18`. **Refunds are pull-based (D-023, closes T-07.3 and T-12.4):** `clear` credits `refundable[bidder] += escrow − payment` (unfilled bids: the whole escrow) and emits `RefundCredited`; bidders call `withdrawRefund(to)` at any time. `clear` performs **no outbound USDG transfer** and can therefore not be reverted by a frozen or paused USDG address.
+6. **Option allocation is pull-based (D-024, closes T-07.4 and T-16):** `clear` records `claimableOptions[seriesId][bidder] += filledQty` and emits `OptionsAllocated`; the bidder calls `claimOptions(seriesId, to)` which mints `OptionToken(seriesId, qty)` to `to`. No ERC-1155 receiver callback runs inside `clear`. An unclaimed allocation is still an option: `OptionToken.claim` (§9.7) accepts either minted tokens or an unminted allocation, so a bidder that never pulls its tokens still receives its payout. Option tokens are standard, freely transferable ERC-1155 (founder decision D-012); whoever holds them at claim time receives the payout. Unfilled offered quantity is simply never allocated (the "burned" quantity in the product description); `offeredQty − filledQty` tokens stay unencumbered.
+7. Premium credited (§4.2) and fee credited to `FeeRouter` as an internal balance (§11; the forwarding transfer to treasury is a separate permissionless `FeeRouter.flush`, so it can never revert `clear`). Series → LIVE. Coverage: `filledQty ≤ totalAssets()` re-checked (I-1). Bond locks of unfilled bidders released (§8.1).
+8. If no bids: series → SKIPPED, vault → IDLE, `AuctionSkipped` emitted, all bond locks released, all escrow credited to `refundable`.
 
-Gas bound: 64 bids × insertion sort ≈ 2 k comparisons + 64 transfers; measured in tests, must stay < 6 M gas.
+Gas bound: 64 bids × insertion sort ≈ 2 k comparisons + 64 storage credits (no transfers); measured in tests, must stay < 6 M gas.
 
 ### 8.3 Reserve price
-Keeper-supplied per auction, not verifiable on-chain. Bound: `reservePrice ≥ S_ref × minReserveBpsOfSpot / 1e4` (curator, default 0 = disabled) and `≤ S_ref` (a call premium above spot is nonsense). The keeper derives the reserve off-chain from an implied-vol model; the spec only bounds it.
+Keeper-supplied per auction, not verifiable on-chain. Bound: `reservePrice ≥ S_ref × minReserveBpsOfSpot[kind] / 1e4` and `≤ S_ref` (a call premium above spot is nonsense). `minReserveBpsOfSpot` is per vault and per series kind, set by the curator via the timelock within the protocol range `[1, 500]`; **protocol defaults are 10 bps (WEEKDAY) and 3 bps (WEEKEND)**, never 0 (D-027, closes T-13.1/T-19). The defaults are placeholders to be tuned against the keeper's implied-vol model before mainnet; the point is that a rogue or careless keeper cannot sell calls for nothing. The keeper derives the reserve off-chain from an implied-vol model; the spec only bounds it.
 
 ---
 
@@ -360,8 +381,10 @@ Keeper-supplied per auction, not verifiable on-chain. Bound: `reservePrice ≥ S
 Founder decisions of 2026-09-02 (DECISIONS.md D-001). Two series kinds, two policies. Never settle on a stale price; halt instead.
 
 ### 9.1 Common definitions
+- All parameters named in this section are read from `series.params`, the snapshot taken at `openAuction` (§6, D-031), never from live vault configuration.
 - `feed` = the vault's Chainlink proxy; `pool` = the vault's 0.05 % Uniswap v3 stock/USDG pool (stored at vault creation, immutable).
-- `lastChainlink` = `feed.latestRoundData()` at the time of the settle call (any age) with `answer > 0`.
+- `refRound` = the last valid Chainlink round with `updatedAt ≤ expiry`, **any age** (D-021, closes T-08.2). It is the reference for every TWAP sanity bound (§9.2 fallback, §9.3) and for the resolution band (§9.6). It is deterministic: it does not depend on when `settle` is called. The keeper supplies it as a hint; the contract verifies it with `next(refRound).updatedAt > expiry` (or none). If no valid round exists (feed dead since before expiry) `refRound` is undefined and the bounds that need it fail, i.e. the TWAP paths are unavailable and `sRef` is the resolution reference.
+- **Jump guard (D-025, closes T-02.1, T-10.2, T-14.2).** Every candidate settlement price `S` on every path (1, 2, 3) must satisfy `|S / sRef − 1| ≤ jumpBps` (per vault, default **3 000 bps = 30 %**, timelocked within `[1 000, 5 000]`, snapshotted at open), where `sRef` is the reference spot stored at `openAuction` (§7.2). Exception, *a multiplier change explains it*: if `token.uiMultiplier()` at settle time `m_now ≠ multiplierAtOpen` and `token.oraclePaused() == false`, the guard instead accepts `S` when `|S × multiplierAtOpen / m_now / sRef − 1| ≤ jumpBps`. Note for implementers and auditors: under ERC-8056 the feed prices one raw token as share price × multiplier, so a correctly sequenced corporate action does **not** move `S` and passes the plain check; the exception only admits a price that moved by the multiplier ratio, which is exactly the feed/multiplier mis-sequencing of THREAT-MODEL T-10.2. Because D-026 refuses to open a series across a staged change, the exception can only apply to a change staged after open; the keeper alerts on `UIMultiplierUpdated` inside a live series and the guardian pauses new auctions until the settlement has been reviewed. A price rejected by the guard → `JumpGuardTripped(seriesId, path, S)`; the path is treated as failed; if all paths fail → HALTED with `reason = JUMP_GUARD` (§9.6).
 - `validRound(r)`: `getRoundData(r)` returns `answer > 0`, `updatedAt > 0`, `answeredInRound ≥ r` semantics ignored (deprecated), and `oraclePaused() == false` on the token at call time.
 - Sequencer hook: `if (sequencerFeed != address(0))` require `answer == 0` and `now − startedAt ≥ sequencerGrace (3600 s)` per https://docs.chain.link/data-feeds/l2-sequencer-feeds . **Disabled in v1 (`sequencerFeed = 0`)** because no address is published for this chain (founder decision D-005); the storage slot and check stay so it can be enabled by timelock.
 - Phase-aware neighbour lookup: for proxy round `r = (p << 64) | a`, `next(r)` is `(p << 64) | (a+1)` if it exists, else `((p+1) << 64) | 1` if that exists, else none. `prev(r)` is `(p << 64) | (a−1)` if `a > 1`, else the last round of phase `p−1` supplied by the keeper in the hint and verified to have `next == r`.
@@ -371,10 +394,11 @@ Primary — Chainlink round at or before expiry. Keeper hint `roundId r`. Accept
 1. `validRound(r)` and `r.updatedAt ≤ expiry`;
 2. `next(r)` is none, or `next(r).updatedAt > expiry` (so `r` is the last round before expiry);
 3. `expiry − r.updatedAt ≤ weekdayMaxStale` — **default 26 h** = heartbeat 86 400 s + 7 200 s (configurable per vault by timelock, protocol bound `[1 h, 30 h]`);
-4. sequencer hook passes.
+4. sequencer hook passes;
+5. jump guard passes (§9.1).
 Then `S = r.answer`, `settlementPath = 1`.
 
-Fallback — TWAP, only if (1)–(3) cannot be satisfied by any round: 30-minute TWAP anchored at expiry (§9.5, `window = 1800`, USD-converted), accepted iff `|twapUSD / lastChainlink.answer − 1| < 3 %`, the pool checks of §9.3 pass, and the USDG/USD read is fresh and inside the band. `settlementPath = 2`.
+Fallback — TWAP, only if (1)–(3) cannot be satisfied by any round: 30-minute TWAP anchored at expiry (§9.5, `window = 1800`, USD-converted), accepted iff `|twapUSD / refRound.answer − 1| ≤ weekdayTwapBoundBps` (300), the pool checks of §9.3 (liquidity and observations) pass, the USDG/USD read is fresh and inside the band, and the jump guard passes. `settlementPath = 2`.
 
 Else → `HALTED` (§9.6).
 
@@ -382,37 +406,43 @@ Else → `HALTED` (§9.6).
 A weekend series never settles on a Chainlink answer older than 2 h (founder decision). Measured last-round ages at Sunday 23:59 UTC are ~52–56 h (§1.3), so Chainlink-at-expiry is not an available path.
 
 Primary — 60-minute Uniswap v3 TWAP anchored at expiry (§9.5, `window = 3600`), accepted iff:
-1. pool checks pass: `observe` succeeds for the anchored window (observation cardinality covers it); in-range liquidity is deep enough that a **250 000 USDG swap would move the price by less than 1 %** (founder decision D-010), evaluated from `slot0.sqrtPriceX96` and `pool.liquidity()` at settle time as
-   - USDG = token0 (NVDA/USDG case): require `liquidity × (√1.01 − 1) ≥ 250 000e6 × sqrtPriceX96 / 2^96`
+1. pool checks pass: `observe` succeeds for the anchored window (observation cardinality covers it); **time-weighted** in-range liquidity over the window is deep enough that a **250 000 USDG swap would move the price by less than 1 %** (founder decision D-010, revised by D-018 to use the window average instead of spot liquidity, closes T-03.3). `L_avg` is the harmonic-mean liquidity over the window from the same `observe` call (§9.5); `sqrtP` is `TickMath.getSqrtRatioAtTick(twapTick)`. Require
+   - USDG = token0 (NVDA/USDG case): `L_avg × (√1.01 − 1) ≥ 250 000e6 × sqrtP_X96 / 2^96`
    - USDG = token1: same inequality (for a v3 swap the token1 amount is `L × ΔsqrtP` and the token0 amount is `L × Δ(1/sqrtP)`; both reduce to `L × (√1.01 − 1) / sqrtP ≥ Δ` for a 1 % price move in the direction that raises the stock price)
-   with `√1.01 − 1` encoded as `4 987 562 / 1e9`; `swapNotionalUSDG` (250 000e6) and `impactBps` (100) are timelocked parameters; pool is the vault's immutable 0.05 % pool;
-2. sanity bound `|twapUSD / lastChainlink.answer − 1| ≤ weekendTwapBoundBps` where `lastChainlink` is the latest Chainlink answer at settle time (normally Friday's last 24/5 round) and `twapUSD` is the USD-converted TWAP of §9.5. **Global default 1 500 bps (15 %), overridable per vault by timelock within `[300, 1500]`** (founder decision D-017);
+   with `√1.01 − 1` encoded as `4 987 562 / 1e9`; `swapNotionalUSDG` (250 000e6) and `impactBps` (100) are timelocked parameters snapshotted at open; pool is the vault's immutable 0.05 % pool. Spot `pool.liquidity()` is not used: an LP that pulls liquidity for the window and re-adds it before the call no longer passes;
+   and **trading activity inside the window** (D-019, closes T-03.4 and T-05.4): at least `minObservationsInWindow` (default **3**, timelocked within `[1, 16]`) pool observations have `blockTimestamp` inside `[expiry − window, expiry]`, and the most recent observation at or before `expiry` is no older than `expiry − 900`. Checked by walking `pool.observations(i)` backwards from `slot0.observationIndex` (bounded to `minObservationsInWindow + 1` initialized entries, wrapping at cardinality). A quiet pool or a sequencer outage across the window leaves no observations in it and the TWAP is rejected instead of settling on an extrapolated tick;
+2. sanity bound `|twapUSD / refRound.answer − 1| ≤ weekendTwapBoundBps` where `refRound` is the last valid Chainlink round at or before expiry (§9.1, D-021; normally Friday's last 24/5 round) and `twapUSD` is the USD-converted TWAP of §9.5. **Global default 1 500 bps (15 %), overridable per vault by timelock within `[300, 1500]`** (founder decision D-017). The reference no longer changes when Monday's first round lands inside the grace window, so path-2 validity does not depend on call timing;
 3. the settle call happens at `now ≤ expiry + twapGrace` (**1 800 s**, founder decision) so the anchored window is still inside the observation buffer;
-4. the USDG/USD feed read is fresh (≤ 26 h) and inside the 0.98–1.02 band (§9.5). Stale or out of band → TWAP invalid, continue to the fallback below (D-015).
+4. the USDG/USD feed read is fresh (≤ 26 h) and inside the 0.98–1.02 band (§9.5). Stale or out of band → TWAP invalid, continue to the fallback below (D-015);
+5. jump guard passes (§9.1).
 Then `S = twapUSD`, `settlementPath = 2`.
 
 Fallback — first fresh Chainlink round after expiry. Keeper hint `roundId r`. Accept iff:
 1. `validRound(r)` and `r.updatedAt > expiry`;
 2. `prev(r).updatedAt ≤ expiry` (so `r` is the first round after expiry), or `r` is aggregator round 1 of a new phase;
 3. `r.updatedAt ≤ expiry + 54 060 s` (= Monday 15:00:00 UTC);
-4. sequencer hook passes.
+4. sequencer hook passes;
+5. jump guard passes (§9.1).
 Then `S = r.answer`, `settlementPath = 3`. The 24/5 feed reopens 18:00 ET Sunday (22:00 or 23:00 UTC), and the first post-weekend round arrived at 00:00:33–00:00:54 UTC Monday on 2026-08-31 for both SPY and NVDA, so this path normally resolves within an hour of expiry.
 
 Else (no TWAP inside grace and no fresh round by Monday 15:00 UTC) → `HALTED`.
 
-Manipulation exposure of the TWAP path, stated so the parameters can be tuned: with strike distance `d` and a pumped TWAP `S' = S(1+m)` the extra payout is `((1+m) − (1+d)) / (1+m)` of collateral for `m > d`; at the bound `m = 15 %` and `d = 5 %` that is ≈ 8.7 % of the option notional. Mitigations: 60-minute window, the 250 000 USDG / 1 % liquidity check, the ±15 % bound, and the curator may tighten `weekendTwapBoundBps` per vault (protocol range `[300, 1500]`). The winning bidder is the only party who profits from a pump; MM bonds are slashable by timelock for demonstrated manipulation (§13).
+Manipulation exposure of the TWAP path, stated so the parameters can be tuned: with strike distance `d` and a pumped TWAP `S' = S(1+m)` the extra payout is `((1+m) − (1+d)) / (1+m)` of collateral for `m > d`; at the bound `m = 15 %` and `d = 5 %` that is ≈ 8.7 % of the option notional. Mitigations: 60-minute window, the 250 000 USDG / 1 % time-weighted liquidity check, the minimum-observations rule, the ±15 % bound, the jump guard, and the curator may tighten `weekendTwapBoundBps` per vault (protocol range `[300, 1500]`). The winning bidder is the only party who profits from a pump; MM bonds are locked for the life of the series (§8.1, §13) and slashable by timelock for demonstrated manipulation. Cap rule (THREAT-MODEL T-03): before any cap increase, re-measure the pool and keep `Σ caps of vaults on the pool × (bound − d_min) / (1 + bound)` well below the realised cost of holding a `bound`-sized move for one hour.
 
 ### 9.4 Interaction with the Monday auction
 If the weekend series settles before Monday 14:00 UTC (normal case) the weekday auction opens on time. If it settles between 14:00 and 16:00 UTC the auction may open late (`openTolerance`, §5). If it halts, no weekday auction; see §5 skipped week.
 
 ### 9.5 TWAP computation
 ```
-(int56[] memory tc,) = pool.observe([secondsAgoStart, secondsAgoEnd]);
+(int56[] memory tc, uint160[] memory spl) = pool.observe([secondsAgoStart, secondsAgoEnd]);
   secondsAgoEnd   = now − expiry            // anchor the window at expiry, not at the call
   secondsAgoStart = secondsAgoEnd + window
-tick = (tc[1] − tc[0]) / int56(window)      // round toward negative infinity when negative (Uniswap OracleLibrary convention)
+tick  = (tc[1] − tc[0]) / int56(window)     // round toward negative infinity when negative (Uniswap OracleLibrary convention)
 sqrtP = TickMath.getSqrtRatioAtTick(tick)
+L_avg = (uint256(window) << 128) / (spl[1] − spl[0])   // harmonic-mean in-range liquidity over the window
+                                            // (secondsPerLiquidityCumulativeX128 delta; Uniswap OracleLibrary.consult convention), D-018
 ```
+`spl[1] − spl[0] == 0` (no time elapsed, impossible for `window > 0`) reverts. `L_avg` replaces `pool.liquidity()` in the depth rule of §9.3. Observation-activity rule: see §9.3 item 1 (D-019); the observations are read directly from `pool.observations(index)`.
 Price in USD (8 dec) per one stock token, with `dS = 18`, `dU = 6`:
 - if stock token is `token1` (NVDA/USDG case, token0 = USDG): `P_raw = 1.0001^tick = token1/token0 = stockWei per USDG unit`, so `price8 = 1e8 × 10^(dS − dU) / 1.0001^tick`; computed as `FullMath.mulDiv(1e8 × 1e12, 2^192, sqrtP²)`.
 - if stock token is `token0`: `price8 = 1e8 × 1.0001^tick / 10^(dS − dU)`; computed as `FullMath.mulDiv(sqrtP², 1e8, 2^192 × 1e12)`.
@@ -429,16 +459,20 @@ Requirements on the USDG/USD read at the settle (or open) call:
 
 Deploy-time action: call `pool.increaseObservationCardinalityNext(65535)` on every allowlisted pool (permissionless; cardinality 6000 today on NVDA/USDG). With 100 ms blocks and one observation per block that has a swap, 6 000 observations may cover only minutes during busy sessions; 65 535 is the v3 maximum. The keeper monitors coverage (`slot0.observationCardinality` and the oldest observation timestamp) every hour and alerts if the buffer would not cover `window + twapGrace`.
 
+Keeper monitoring of external code (D-020, closes T-11.4): the keeper stores the stock-token beacon (`0xe10b6f6b…`) implementation address read at deploy (`0xb35490d6…`) and the USDG implementation (`0x68184c44…`), polls both every 5 minutes, and on any change (or a `Upgraded` event) pauses deposits and new auctions on all vaults via the guardian key and pages the founder. Unpause only after a human has confirmed the new implementation keeps raw-unit `balanceOf`, no transfer fee, no transfer hooks and unchanged `decimals`.
+
 ### 9.6 HALTED and resolution
-- `settle` reverts with a typed error until the keeper (or anyone) calls `halt(seriesId)` once all paths are provably exhausted on-chain (for WEEKDAY: no valid round and `now > expiry + twapGrace`; for WEEKEND: `now > expiry + 54 060`). A USDG depeg alone never halts a weekend series; it only removes the TWAP path (§9.5). `halt` sets `state = HALTED`, calls `RiskModule.pauseNewAuctions(vaultId, reason)`, emits `SeriesHalted` with `reason = NO_ORACLE_PATH`.
-- `resolveHalted(seriesId, price8, bytes evidenceURI)` — timelock only (48 h public delay). Sets `settlementPrice = price8`, `settlementPath = 4`, finishes settlement exactly as `settle` would. Option holders and depositors can observe the proposal in the timelock before execution.
-- While a vault is halted: no new auctions; deposits blocked; queued redeems are executed at resolution; `claimPremium` and claims for previously settled series keep working.
+- `settle` reverts with a typed error until the keeper (or anyone) calls `halt(seriesId)` once all paths are provably exhausted on-chain (for WEEKDAY: no valid round and `now > expiry + twapGrace`, or every available round tripped the jump guard; for WEEKEND: `now > expiry + 54 060`, or the same). A USDG depeg alone never halts a weekend series; it only removes the TWAP path (§9.5). `halt` sets `state = HALTED`, calls `RiskModule.pauseNewAuctions(vaultId, reason)`, emits `SeriesHalted` with `reason ∈ {NO_ORACLE_PATH, JUMP_GUARD}`.
+- **Resolution band (D-022, closes T-14.2).** `resolveRef` = `refRound.answer` (§9.1: the last valid Chainlink round at or before expiry, any age); if no such round exists, `resolveRef = sRef`. `resolveBoundBps = 2 500` is a **contract constant**, not a parameter. Any resolution price must satisfy `resolveRef × 0.75 ≤ price8 ≤ resolveRef × 1.25`.
+- `resolveHalted(seriesId, price8, bytes evidenceURI)` — timelock only (48 h public delay). **Reverts if `price8` is outside the resolution band.** Sets `settlementPrice = price8`, `settlementPath = 4`, finishes settlement exactly as `settle` would. Option holders and depositors can observe the proposal in the timelock before execution. Worst case with a 5 % OTM strike and a resolution at the top of the band: `(1.25 − 1.05) / 1.25 = 16 %` of collateral, instead of unbounded.
+- `resolveHaltedByOracle(seriesId, roundHint)` — **permissionless after `haltedTimeout = 7 days` past `expiry`** (D-033, closes T-14.7 and T-11.6). Accepts the first valid Chainlink round with `updatedAt > expiry` (verified with `prev` as in §9.3, any lateness, `oraclePaused() == false`), **clamps** its answer into the resolution band, sets `settlementPrice` to the clamped value, `settlementPath = 5`, emits `SeriesResolvedByOracle(seriesId, rawAnswer, clampedPrice, roundId)` and finishes settlement exactly as `settle` would. Clamping rather than rejecting guarantees that a halted series can always be resolved without any key, which removes the single-admin-key liveness dependency; the timelock path stays for feeds that never return. Before `haltedTimeout` only the timelock can resolve.
+- While a vault is halted: no new auctions; deposits blocked; queued redeems are executed at resolution; `claimPremium`, `withdrawRefund`, `claimOptions` and claims for previously settled series keep working.
 
 ### 9.7 Settlement effects (all paths)
 1. `series.settlementPrice = S; payoutPerOption = S > K ? (S − K) × 1e18 / S : 0`.
 2. `payoutOwed += filledQty × payoutPerOption / 1e18` (tokens reserved for option holders).
 3. Series → SETTLED; vault → IDLE; process queues (§4.3).
-4. `OptionToken.claim(seriesId, qty)` burns `qty` and transfers `qty × payoutPerOption / 1e18` stock tokens; decrements `payoutOwed`. No expiry on claims.
+4. `OptionToken.claim(seriesId, qty)` burns `qty` and transfers `qty × payoutPerOption / 1e18` stock tokens; decrements `payoutOwed`. No expiry on claims. A bidder with an unminted allocation (§8.2 step 6) may call `claim` directly; the allocation is decremented instead of burning tokens. Bond locks of filled bidders are released here (§8.1).
 5. If `asset.balanceOf(vault) < payoutOwed` at settlement (only possible if the issuer burned or froze vault tokens, §2), payouts are scaled pro-rata by `balance / payoutOwed`, the shortfall is recorded, and `ShortfallRecorded` triggers the safety-module flow (§14). Invariant I-2 covers the normal case.
 
 ---
@@ -458,15 +492,16 @@ Rejected alternative, recorded for completeness: if `K` were defined per underly
 
 ### 10.3 Oracle pause and pending multipliers
 - `settle` and `openAuction` revert while `token.oraclePaused() == true`; the keeper retries. The Chainlink feed holds its last value during the pause, so a round published just before the pause is still a valid "at or before expiry" round after unpause. The weekend TWAP path is unaffected by the flag but the ±15 % bound then compares against the pre-pause Chainlink answer; if a large discontinuity is expected (e.g. a spin-off, which is not an active corporate-action type today per the API) the curator should skip that weekend by not opening the auction.
-- The keeper watches `UIMultiplierUpdated`, `newUIMultiplier()/effectiveAt()` and `GET /corporate-actions`, and surfaces pending actions in the frontend. No on-chain behaviour depends on them.
-- `Series.multiplierAtOpen` is emitted for indexers so a UI can show "1 option = X underlying shares".
+- `openAuction` refuses to open a series that spans a staged multiplier change (`effectiveAt` inside `(now, expiry]`, D-026). A change staged **after** open is the only way a multiplier can change inside a live series; the keeper alerts on it and the jump-guard exception of §9.1 governs settlement.
+- The keeper watches `UIMultiplierUpdated`, `newUIMultiplier()/effectiveAt()` and `GET /corporate-actions`, and surfaces pending actions in the frontend.
+- `Series.multiplierAtOpen` is emitted for indexers so a UI can show "1 option = X underlying shares" and is read by the jump-guard exception (§9.1). It enters no payout formula.
 
 ---
 
 ## 11. Fees (FeeRouter)
 
 - Performance fee on **premium only**: `feeBps` default 1000 (10 %), protocol bound `[0, 2000]`, per vault, timelocked. No management fee, no fee on principal, no fee on settlement.
-- Taken at clearing: `fee = premiumGross × feeBps / 1e4` USDG, `FeeRouter.collect(vaultId, fee)` is called by the AuctionHouse with the USDG already transferred.
+- Taken at clearing: `fee = premiumGross × feeBps / 1e4` USDG, `FeeRouter.collect(vaultId, fee)` is called by the AuctionHouse with the USDG already transferred to the router. `collect` only updates internal balances; the transfer to `treasury` (or the WRITE-mode processing) happens in a separate permissionless `FeeRouter.flush(vaultId)`, so no fee-side revert can block `clear` (D-023).
 - Payment modes (per vault, set by the curator, effective after timelock):
   - `USDG` (default): the USDG fee is forwarded to `treasury` (a timelock-controlled address).
   - `WRITE` (post-token, founder decision, reading confirmed 2026-09-02): the USDG fee is still deducted from premium at clearing; the FeeRouter then debits the curator's prefunded WRITE balance by `feeUSD × (1e4 − writeDiscountBps) / 1e4` converted at the WRITE/USDG 30-minute TWAP (`writePool`, **placeholder `address(0)` until the token launches; set by timelock post-launch, D-016**; while zero, `setFeeMode(WRITE)` reverts and `depositWrite` is disabled), burns `writeBurnShareBps` of it and forwards the rest to `treasury`; the USDG fee is then paid out to the curator's `feeRebateRecipient`. If the curator's WRITE balance is insufficient the router falls back to the USDG path for that clearing and emits `WriteModeFallback`. **`writeDiscountBps = 2000` (20 % discount), `writeBurnShareBps = 5000` (50 % of the WRITE burned, rest to treasury)** — founder decision D-011.
@@ -490,7 +525,7 @@ Rejected alternative, recorded for completeness: if `K` were defined per underly
 | Curator bond | required to call `VaultFactory.createVault` and to propose parameter changes for that vault | **10 000 USDG** (founder decision D-011); one bond per vault | migrated to WRITE, amount by timelock |
 | MM bond | required to bid | **25 000 USDG** (founder decision) | migrated to WRITE |
 
-- `postBond(kind)` / `withdrawBond(kind)`: withdrawal allowed only when the holder has no live series (MM: no unclaimed option tokens in LIVE series; curator: vault has no live series) and after `bondCooldown` (7 days) from the withdrawal request.
+- `postBond(kind)` / `withdrawBond(kind)`: withdrawal allowed only when the holder has **zero active locks** and after `bondCooldown` (7 days) from the withdrawal request. Locks are by participation (D-030): `AuctionHouse.bid` calls `lock(bidder, seriesId)` on the bidder's first bid in a series; the lock is released at `clear` for bidders with no fill and at SETTLED/RESOLVED for filled bidders. Curator locks: one per live series of the curator's vault. Locks never depend on option-token balances, so transferring option tokens away does not unlock a bond. `hasActiveMMBond(account)` is true while a bond of the required asset and amount is posted and no withdrawal request is pending.
 - Slashing: only via timelock, `slashBond(holder, kind, amount, evidenceURI)`, capped at 100 % of the bond, proceeds to `treasury`. Grounds are off-chain (attestation fraud, demonstrated TWAP manipulation, malicious parameters) and public in the timelock queue.
 - Migration to WRITE: `bondAsset` switch by timelock with a 30-day grace during which both assets satisfy the requirement; after grace, USDG bonds no longer count and become withdrawable immediately (no cooldown).
 - MM eligibility also requires an off-chain signed non-US-person attestation checked by the keeper's/frontend's allowlist service; **nothing on-chain** enforces it (founder decision). `BondManager` therefore has no attestation field.
@@ -509,11 +544,13 @@ Rejected alternative, recorded for completeness: if `K` were defined per underly
 ## 15. Governance and admin
 
 - `TimelockController(minDelay = 48 h, proposers = [adminEOA], executors = [adminEOA], admin = itself)`. The admin EOA is a hardware wallet. No multisig, by decision (D-003).
-- Behind the timelock: every parameter setter in every contract; `resolveHalted`; `slashBond`; `SafetyModule.slash`; `capMode`, `capUSD`, `capWeightBps`, `k`; `bondAsset`; `feeBps`, fee mode acceptance, `treasury`; `sequencerFeed`; `weekdayMaxStale`, `twapGrace`, `weekendTwapBoundBps`, `swapNotionalUSDG`, `impactBps`; adding a vault (factory allowlist is fixed at deploy; adding a token requires a new factory deployment or a timelocked `allowToken`).
-- Guardian (`GUARDIAN_ROLE` in RiskModule, no delay): a **hot key on the keeper server, distinct from the keeper's transaction key** (founder decision D-012), so the keeper's alerting can pause within seconds without human presence. Functions: `pauseNewAuctions(vaultId | ALL)`, `pauseDeposits(vaultId | ALL)`, `unpause*` of its own pauses. Compromise of this key can at worst pause new auctions and deposits; rotation is a timelocked `grantRole/revokeRole` (RUNBOOK.md). It cannot: move any funds, change any parameter, block `withdraw/redeem` in IDLE, block `claimPremium`, block `OptionToken.claim`, block queue processing after settlement, or stop `settle`. After a guardian pause, any live series still settles; once settled the vault is IDLE with withdrawals open indefinitely until unpause.
-- Deployer: deploys with `CREATE2`, wires roles, runs the post-deploy checklist (`increaseObservationCardinalityNext`, verify on Blockscout), then `renounceRole` on every contract and transfers ownership to the timelock. Verified in a fork test that reads every role after deployment.
+- Behind the timelock: every parameter setter in every contract; `resolveHalted` (bounded, §9.6); `slashBond`; `SafetyModule.slash`; `capMode`, `capUSD`, `capWeightBps`, `k`; `bondAsset`; `feeBps`, fee mode acceptance, `treasury`; `sequencerFeed`; `weekdayMaxStale`, `twapGrace`, `weekendTwapBoundBps`, `swapNotionalUSDG`, `impactBps`, `minObservationsInWindow`, `jumpBps`; curator floors `minStrikeDistanceBps[kind]`, `minReserveBpsOfSpot[kind]`; `sunset(vaultId)`; `KEEPER_ROLE` and `GUARDIAN_ROLE` grants and revocations; adding a vault (factory allowlist is fixed at deploy; adding a token requires a new factory deployment or a timelocked `allowToken`). Oracle parameters take effect only for series opened after execution (snapshot, §6, D-031).
+- Constants (not parameters, not changeable by anyone): `resolveBoundBps = 2 500`, `haltedTimeout = 7 days`, the protocol bounds on every parameter.
+- Keeper (`KEEPER_ROLE`, D-028): the only caller of `openAuction`. Everything else the keeper does (`clear`, `settle`, `halt`, `processDeposits/Redeems`, `flush`, `resolveHaltedByOracle`) is permissionless, so liveness never depends on the keeper key. Grant/revoke is timelocked; the fast response to a rogue keeper is the guardian pausing new auctions.
+- Guardian (`GUARDIAN_ROLE` in RiskModule, no delay): **two holders** (D-012 as amended by D-029): a hot key on the keeper server, distinct from the keeper's transaction key, so the keeper's alerting can pause within seconds without human presence; and an off-server key (hardware wallet or phone signer) held by the founder, so a compromised server cannot prevent a human pause during the 48 h it takes to rotate roles. Functions: `pauseNewAuctions(vaultId | ALL)`, `pauseDeposits(vaultId | ALL)`, `unpause*` of any guardian pause (either holder can unpause the other's pause). Compromise of either key can at worst pause new auctions and deposits; rotation is a timelocked `grantRole/revokeRole` (RUNBOOK.md). It cannot: move any funds, change any parameter, block `withdraw/redeem` in IDLE, block `claimPremium`, `withdrawRefund`, `claimOptions` or `OptionToken.claim`, block queue processing after settlement, or stop `settle`, `halt` or `resolveHaltedByOracle`. After a guardian pause, any live series still settles; once settled the vault is IDLE with withdrawals open indefinitely until unpause.
+- Deployer: deploys with `CREATE2`, wires roles, runs the post-deploy checklist (`increaseObservationCardinalityNext`, verify on Blockscout), then `renounceRole` on every contract and transfers ownership to the timelock. Verified in a fork test that reads every role after deployment. No contract that holds user funds has a sweep, rescue or arbitrary-call function.
 - Treasury, team tokens and LP live in `Vesting` contracts and locked LP, never in the admin wallet (CLAUDE.md rule 5).
-- Upgradeability: none. Migration = new deployment + depositor-initiated withdraw/deposit.
+- Upgradeability: none. Every cross-contract reference is `immutable`; no proxy, no `delegatecall` in fund-holding contracts. **Migration path from day one (D-034, closes T-17):** `sunset(vaultId)` behind the timelock sets `vault.sunset = true`; after the current series settles or resolves the vault refuses `openAuction` permanently and stays IDLE with `withdraw/redeem` open forever; queued deposits are refundable (`cancelDeposit`) and deposits revert. `sunset` is irreversible. A v2 is a new deployment; the frontend reads `sunset()` on old vaults and offers withdraw-then-deposit into the new vault. Option tokens, bonds and premium accumulators of the old deployment keep working until claimed.
 
 ---
 
@@ -525,21 +562,22 @@ Vault
 - `DepositQueued(*receiver, *requestId, assets)`, `DepositQueueCancelled(*requestId)`, `DepositExecuted(*requestId, shares, sharePrice)`
 - `RedeemQueued(*owner, *requestId, shares)`, `RedeemQueueCancelled(*requestId)`, `RedeemExecuted(*requestId, assets)`, `WithdrawalClaimed(*owner, assets)`
 - `PremiumAccrued(*seriesId, premiumNet, accPremiumPerShare)`, `PremiumClaimed(*account, *to, usdg)`
-- `VaultStateChanged(*vaultId, from, to)`
+- `VaultStateChanged(*vaultId, from, to)`, `VaultSunset(*vaultId)`
 - `ShortfallRecorded(*vaultId, *seriesId, tokensShort)`, `CoverageInjected(*seriesId, tokens)`
 Series / Auction
 - `AuctionOpened(*vaultId, *seriesId, kind, auctionOpen, auctionClose, expiry, sRef, strike, offeredQty, reservePrice, multiplierAtOpen)`
 - `BidPlaced(*seriesId, *bidder, bidId, qty, price, escrow)`
 - `AuctionCleared(*seriesId, clearingPrice, filledQty, premiumGross, fee)`, `BidFilled(*seriesId, *bidder, bidId, filledQty, refund)`
+- `RefundCredited(*seriesId, *bidder, usdg)`, `RefundWithdrawn(*bidder, *to, usdg)`, `OptionsAllocated(*seriesId, *bidder, qty)`, `OptionsClaimed(*seriesId, *bidder, *to, qty)`
 - `AuctionSkipped(*seriesId)`
 - `SeriesSettled(*seriesId, settlementPrice, settlementPath, payoutPerOption, payoutTotal, oracleRoundId)`
-- `TwapRejected(*seriesId, reason)`, `SeriesHalted(*seriesId, reason)`, `SeriesResolved(*seriesId, price, evidenceURI)`
+- `TwapRejected(*seriesId, reason)` (`USDG_STALE`, `USDG_OUT_OF_BAND`, `LIQUIDITY`, `OBSERVATIONS`, `BOUND`, `GRACE`), `JumpGuardTripped(*seriesId, path, price)`, `SeriesHalted(*seriesId, reason)`, `SeriesResolved(*seriesId, price, evidenceURI)`, `SeriesResolvedByOracle(*seriesId, rawAnswer, clampedPrice, roundId)`
 - `OptionClaimed(*seriesId, *holder, qty, tokens)`
 Risk / admin
 - `Paused(*vaultId, what, *by)`, `Unpaused(*vaultId, what, *by)`
 - `ParameterChanged(*target, key, oldValue, newValue)`
 - `FeeCollected(*vaultId, *seriesId, usdg, mode)`, `WriteFeePaid(*vaultId, writeAmount, burned)`, `WriteModeFallback(*vaultId)`
-- `BondPosted(*holder, kind, asset, amount)`, `BondWithdrawRequested(*holder, kind, unlockAt)`, `BondWithdrawn(*holder, kind, amount)`, `BondSlashed(*holder, kind, amount, evidenceURI)`
+- `BondPosted(*holder, kind, asset, amount)`, `BondLocked(*holder, *seriesId)`, `BondUnlocked(*holder, *seriesId)`, `BondWithdrawRequested(*holder, kind, unlockAt)`, `BondWithdrawn(*holder, kind, amount)`, `BondSlashed(*holder, kind, amount, evidenceURI)`
 - `Staked(*account, amount)`, `UnstakeRequested(*account, amount, unlockAt)`, `Unstaked(*account, amount)`, `Slashed(amount, recipient, evidenceURI)`
 
 ### 16.2 Read functions by consumer
@@ -548,12 +586,15 @@ Keeper
 - `oracle.referencePrice(vaultId) → (price8, source)`; `oracle.previewSettle(seriesId, hint) → (ok, price8, path, reason)` (pure view mirror of `settle`)
 - `oracle.chainlinkRoundAtOrBefore(feed, ts, hintRound)` and `chainlinkFirstRoundAfter(feed, ts, hintRound)` views used to build hints
 - `pool` observation coverage helpers: `oracle.twapCoverageSeconds(pool)`
-- `auction.bids(seriesId)`, `auction.previewClear(seriesId) → (clearingPrice, filledQty)`
+- `auction.bids(seriesId)`, `auction.previewClear(seriesId) → (clearingPrice, filledQty)`, `auction.refundable(account)`, `auction.claimableOptions(seriesId, account)`
+- `oracle.canResolveByOracle(seriesId) → (bool, unlockAt)`, `oracle.resolutionBand(seriesId) → (low8, high8)`, `series(seriesId).params`
+- `vault.sunset()`, `bond.activeLocks(account)`
 Points indexer
 - all events above; specifically `Deposit/Withdraw/*Executed` for share-time, `PremiumAccrued` for yield, `BidPlaced/BidFilled` for MM activity, `Transfer` of vault shares (ERC-20) and of `OptionToken` (ERC-1155 `TransferSingle/Batch`)
 - `vault.totalAssets()`, `vault.totalSupply()`, `vault.convertToAssets(1e18)` at each settlement block
 Frontend
-- `vault.maxDeposit(user)`, `maxWithdraw(user)`, `previewDeposit`, `previewRedeem`, `premiumClaimable(user)`, `queuedDeposit(user)`, `queuedRedeem(user)`, `withdrawalClaimable(user)`
+- `vault.maxDeposit(user)`, `maxWithdraw(user)`, `previewDeposit`, `previewRedeem`, `premiumClaimable(user)`, `queuedDeposit(user)`, `queuedRedeem(user)`, `withdrawalClaimable(user)`, `vault.sunset()`
+- `auction.refundable(user)`, `auction.claimableOptions(seriesId, user)`
 - `series(seriesId)` struct, `vault.currentSeriesId()`, `vault.nextEvent() → (kind, at)`
 - `cap.remainingCapUSD(vaultId)`, `cap.capMode()`
 - `fee.mode(vaultId)`, `fee.writeBalance(vaultId)`
@@ -574,13 +615,19 @@ Frontend
 
 - **I-1 Coverage**: for every vault, `Σ filledQty of LIVE series ≤ asset.balanceOf(vault) − payoutOwed − withdrawalClaimable − queuedDepositTokens` at all times (equivalently `≤ totalAssets()`), and offered quantity is checked at open and at clear.
 - **I-2 Payout bound**: `payoutPerOption < 1e18` for every settled series; `payoutOwed ≤ asset.balanceOf(vault)` unless a `ShortfallRecorded` event exists.
-- **I-3 Escrow conservation**: `USDG.balanceOf(AuctionHouse) == Σ escrow of open bids`; after `clear`, every bid's escrow equals `filled × clearingPrice / 1e18 + refund`.
+- **I-3 Escrow conservation**: `USDG.balanceOf(AuctionHouse) == Σ escrow of open bids + Σ refundable` (sub-unit dust excluded); after `clear`, every bid's escrow equals `filled × clearingPrice / 1e18 + refund credited`; `Σ claimableOptions[seriesId] + OptionToken.totalSupply(seriesId) + Σ claimed qty == filledQty` for every series.
 - **I-4 Premium conservation**: `USDG.balanceOf(vault) == Σ premiumClaimable + (unsettled accumulator dust)`; the sum of all `PremiumClaimed` never exceeds the sum of all `premiumNet`.
 - **I-5 Never stale**: no `SeriesSettled` with `settlementPath == 1` has `expiry − round.updatedAt > weekdayMaxStale`; no `settlementPath ∈ {2,3}` on a WEEKEND series uses a Chainlink answer with `updatedAt ≤ expiry` as the settlement price.
-- **I-6 Windows**: `Deposit`/`Withdraw` events only occur while `state == IDLE`; queued executions only occur at or after a settlement of the same vault.
+- **I-6 Windows**: `Deposit`/`Withdraw` events only occur while `state == IDLE`; queued deposit executions only occur while `state == IDLE`; queued redeem executions only occur at or after a settlement of the same vault. `settle`, `halt` and both resolve functions emit no ERC-20 `Transfer` of the stock token.
 - **I-7 Guardian scope**: no guardian-only function changes any storage other than pause flags.
 - **I-8 Share price monotonicity outside settlement**: `convertToAssets(1e18)` is constant between two settlements of the same vault (no fees on principal, no rebasing).
 - **I-9 USDG peg guard**: no `SeriesSettled` with `settlementPath == 2` exists whose settle block had a USDG/USD answer outside `[0.98e8, 1.02e8]` or older than 26 h.
+- **I-10 Jump guard**: for every `SeriesSettled` with `settlementPath ∈ {1,2,3}`, `|settlementPrice / sRef − 1| ≤ params.jumpBps`, or `multiplierAtOpen ≠ uiMultiplier()` at the settle block and the multiplier-adjusted ratio is within the bound.
+- **I-11 Resolution band**: for every series with `settlementPath ∈ {4,5}`, `settlementPrice ∈ [0.75 × resolveRef, 1.25 × resolveRef]`.
+- **I-12 Parameter snapshot**: `series.params` never changes after `AuctionOpened`; a `ParameterChanged` event never alters the outcome of `previewSettle` for a series that is already open.
+- **I-13 Bond locks**: an MM whose bid was filled in a series that is LIVE or HALTED has `activeLocks > 0` and `withdrawBond` reverts, regardless of its option-token balance.
+- **I-14 Liveness without keys**: from any HALTED series and any block ≥ `expiry + haltedTimeout`, there exists a permissionless call sequence (`resolveHaltedByOracle`, then queue processing) that returns the vault to IDLE whenever the feed has published any valid round after expiry.
+- **I-15 Sunset**: after `VaultSunset`, no `AuctionOpened` for that vault; `maxWithdraw` is never forced to 0 by any flag once the last series is settled.
 
 ---
 
@@ -590,7 +637,9 @@ Resolved on 2026-09-02 (see DECISIONS.md D-009 to D-014): curator bond 10 000 US
 
 Closed on 2026-09-02 (D-015 to D-017): TWAPs are converted to USD with the USDG/USD feed, and a USDG/USD read that is stale or outside 0.98–1.02 invalidates the TWAP path only (the Chainlink fallback still runs); `writePool` is a post-launch placeholder (`address(0)`); the weekend TWAP bound stays at 15 % globally, per-vault configurable.
 
-No open questions remain for v0.1. New questions go here with an `OQ-` id and are closed with a DECISIONS.md entry.
+Closed on 2026-09-02 (D-018 to D-034): all sixteen revisions from THREAT-MODEL.md §4 accepted: time-weighted TWAP liquidity, minimum observations in the window, beacon monitoring, deterministic bound reference, resolution band ±25 % with permissionless resolution after 7 days, pull-based refunds and option allocation, bond locks by participation, no series across a staged multiplier change, jump guard ±30 % vs `sRef`, curator floors on strike distance and reserve, second guardian key, `KEEPER_ROLE` on `openAuction`, parameter snapshot per series, `requestDeposit` in any state with execution at the next IDLE, `sunset`.
+
+Still open (not among the sixteen, THREAT-MODEL T-14): **OQ-001** whether a second cold key should hold `CANCELLER_ROLE` on the timelock (must not be the guardian). **OQ-002** measure the USDG/USD feed weekend cadence and the SPY/QQQ pool depth before choosing `usdgMaxStale` and creating the ETF vaults (THREAT-MODEL T-12.5, T-03). New questions go here with an `OQ-` id and are closed with a DECISIONS.md entry.
 
 ---
 

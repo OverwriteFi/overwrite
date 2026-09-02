@@ -206,3 +206,209 @@ Format: ID · date · decision · alternatives considered · why · sources. New
 **Alternatives considered.** Starting at 1 000 bps for the first month — rejected: with launch caps of 25 000 USDG per vault (D-011) and the 250 000 USDG / 1 % liquidity rule (D-010), the manipulation profit ceiling (≈ 8.7 % of notional for a 5 % OTM weekend strike, SPEC §9.3) is small relative to the cost of moving the pool, and a tighter bound would trip on legitimate weekend moves in single names.
 
 **Consequences.** SPEC.md §9.3.
+
+---
+
+## D-018 · 2026-09-02 · TWAP liquidity rule uses time-weighted liquidity over the window (RS-01)
+
+**Decision.** The depth rule of D-010 (`L × (√1.01 − 1) ≥ 250 000e6 × sqrtP_X96 / 2^96`) is evaluated with the harmonic-mean in-range liquidity over the TWAP window, `L_avg = (window << 128) / (spl[1] − spl[0])` from the `secondsPerLiquidityCumulativeX128` values returned by the same `observe` call, not with spot `pool.liquidity()` at settle time.
+
+**Alternatives considered.** Spot liquidity at the call (v0.1): an LP can withdraw liquidity for the window, move the price cheaply, re-add it and call `settle`. Sampling liquidity at several blocks by the keeper: off-chain, unverifiable.
+
+**Why.** Closes THREAT-MODEL T-03.3. The manipulator must now keep the pool deep for the whole hour they are manipulating, which is the cost the rule was meant to impose. The value is available for free from the `observe` call already made (Uniswap `OracleLibrary.consult` convention).
+
+**Consequences.** SPEC §9.3 item 1, §9.5. `TwapRejected(LIQUIDITY)` reason. Fork test must compute `L_avg` on the real NVDA/USDG pool and compare with the cast spot value (9.5037e18 on 2026-09-02).
+
+---
+
+## D-019 · 2026-09-02 · TWAP requires trading activity inside the window (RS-02, RS-03 folded in)
+
+**Decision.** Path 2 requires at least `minObservationsInWindow` (default 3, timelocked within `[1, 16]`, snapshotted per series) pool observations with `blockTimestamp` inside `[expiry − window, expiry]`, and the most recent observation at or before `expiry` no older than `expiry − 900`. Otherwise the TWAP is rejected (`TwapRejected(OBSERVATIONS)`) and the series falls through to the next path.
+
+**Alternatives considered.** RS-03 alone (only the "latest observation ≤ 900 s old" check): cheaper, but a single swap at 23:45 satisfies it; kept as the second half of this rule. Reading a sequencer uptime feed: none exists for this chain (D-005).
+
+**Why.** Closes THREAT-MODEL T-03.4 and T-05.4. Uniswap `observe` linearly interpolates between stored observations, so a window with no swaps returns the last trade before the window as if it had held; that is a Friday price on a Sunday (the very thing D-001 rejected for Chainlink) and, after a sequencer outage, a stale price presented as fresh. Requiring observations inside the window turns both into a fall-through to path 3.
+
+**Consequences.** SPEC §9.3 item 1, §9.5, `OracleParams.minObservationsInWindow`. Bounded backwards walk over `pool.observations` from `slot0.observationIndex`.
+
+---
+
+## D-020 · 2026-09-02 · Keeper monitors the stock-token beacon and USDG implementation; guardian pauses on change (RS-10)
+
+**Decision.** The keeper stores the beacon implementation (`0xb35490d6f9163DE4F80d88dc75c3516eb64C5aE2`) and the USDG implementation (`0x68184c449e1a8f34fa18d289737129fd27b66f8f`) read at deploy, polls both every 5 minutes, and on any change pauses deposits and new auctions on all vaults with the guardian key and pages the founder. Unpause requires a human review of the new code (raw-unit `balanceOf`, no fee, no hooks, same decimals).
+
+**Alternatives considered.** On-chain check of the implementation address in `settle`/`deposit`: would freeze the protocol on a benign upgrade with no way to review; rejected. Doing nothing: an upgrade that adds a transfer fee or UI-scaled `balanceOf` silently breaks accounting.
+
+**Why.** Closes THREAT-MODEL T-11.4 (monitoring only; the risk itself is not mitigable). One beacon upgrades all nine tokens at once and its governance is unverified (SPEC §19).
+
+**Consequences.** SPEC §9.5 (keeper monitoring paragraph), RUNBOOK.md checklist for reviewing an upgrade.
+
+---
+
+## D-021 · 2026-09-02 · Deterministic reference for TWAP sanity bounds: last Chainlink round at or before expiry (RS-04)
+
+**Decision.** `refRound` = last valid Chainlink round with `updatedAt ≤ expiry`, any age, verified on-chain via `next(refRound).updatedAt > expiry`. It is the reference for the weekday TWAP fallback (3 %), the weekend TWAP bound (15 %) and the resolution band (D-022). "Latest answer at call time" is no longer used anywhere.
+
+**Alternatives considered.** Latest answer at settle time (v0.1): flips from Friday's round to Monday's first round the moment it lands inside the 30-minute grace window, so path-2 validity depended on who called when.
+
+**Why.** Closes THREAT-MODEL T-08.2. Settlement must not have a timing-dependent outcome that a bot can select.
+
+**Consequences.** SPEC §9.1, §9.2, §9.3 item 2, §9.6. Keeper supplies `refRound` as a hint; `previewSettle` mirrors it.
+
+---
+
+## D-022 · 2026-09-02 · `resolveHalted` is bounded to ±25 % of the last valid oracle price; the bound is a constant (RS-13)
+
+**Decision.** `resolveRef = refRound.answer` (D-021), or `sRef` if no valid round at or before expiry exists. `resolveBoundBps = 2 500` is a contract constant. `resolveHalted(seriesId, price8, evidenceURI)` reverts unless `0.75 × resolveRef ≤ price8 ≤ 1.25 × resolveRef`.
+
+**Alternatives considered.** Unbounded (v0.1): with a single admin EOA and no canceller, a compromised key could halt a live series by parameter change and then resolve it at 100× spot, taking ~99 % of collateral, with depositors unable to exit a live series (THREAT-MODEL T-14.2). A timelocked parameter instead of a constant: the same key could widen it first; rejected.
+
+**Why.** Closes T-14.2. Worst case with a 5 % OTM strike and a resolution at the top of the band is 16 % of collateral instead of total loss. A genuine move beyond 25 % between the last pre-expiry round and expiry is a case for the timelock to resolve at the band edge and document; that is a bounded, visible loss.
+
+**Consequences.** SPEC §9.6, invariant I-11.
+
+---
+
+## D-023 · 2026-09-02 · Refunds and fee forwarding are pull-based; `clear` makes no outbound transfer (RS-06)
+
+**Decision.** `clear` credits `refundable[bidder]` (escrow minus payment, or the full escrow for unfilled and skipped auctions) and credits the fee to `FeeRouter` as an internal balance. Bidders call `withdrawRefund(to)`; anyone calls `FeeRouter.flush(vaultId)` to forward fees to treasury. `clear` therefore contains no `safeTransfer` out.
+
+**Alternatives considered.** Push refunds in the same transaction (v0.1): a single bidder address frozen by Paxos (`isFrozen`) or a paused USDG makes `clear` revert forever, leaving the series in AUCTION and the vault unable to reach IDLE. Try/catch around each transfer: works but leaves the escrow stranded and complicates I-3.
+
+**Why.** Closes THREAT-MODEL T-07.3 and T-12.4. State transitions must never depend on a third party's willingness or ability to receive tokens.
+
+**Consequences.** SPEC §8.2 steps 5, 7, 8; §11; §9.6; events `RefundCredited`, `RefundWithdrawn`; invariant I-3 revised.
+
+---
+
+## D-024 · 2026-09-02 · Option allocation is pull-based; no ERC-1155 mint inside `clear` (RS-07, as amended by the founder)
+
+**Decision.** `clear` records `claimableOptions[seriesId][bidder]`; the bidder calls `claimOptions(seriesId, to)` to mint the ERC-1155. `OptionToken.claim` accepts an unminted allocation as well as tokens, so a bidder that never pulls still receives its payout.
+
+**Alternatives considered.** RS-07 as proposed (reject contract bidders lacking `IERC1155Receiver` at `bid`, mint last in `clear`). The founder chose pull-based minting instead: it removes the callback from `clear` entirely rather than gating who may bid, and it is symmetric with D-023.
+
+**Why.** Closes THREAT-MODEL T-07.4 (a non-receiver contract bidder reverting `clear`) and removes the only present-day reentrancy callback inside a state transition (T-16).
+
+**Consequences.** SPEC §3, §8.2 step 6, §9.7 step 4; events `OptionsAllocated`, `OptionsClaimed`; invariant I-3 extended with the allocation identity.
+
+---
+
+## D-025 · 2026-09-02 · Per-vault jump guard: settlement price within ±30 % of `sRef` unless a multiplier change explains it (RS-05, as amended by the founder)
+
+**Decision.** Every candidate settlement price on paths 1, 2 and 3 must satisfy `|S / sRef − 1| ≤ jumpBps` (per vault, default 3 000, timelocked within `[1 000, 5 000]`, snapshotted per series). Exception: if `uiMultiplier()` at settle differs from `multiplierAtOpen` and `oraclePaused()` is false, the multiplier-adjusted ratio `S × multiplierAtOpen / uiMultiplier()` is tested instead. A tripped guard fails that path; if all paths fail the series halts with `reason = JUMP_GUARD` and is resolved inside the D-022 band.
+
+**Alternatives considered.** RS-05 as proposed (40 % vs the previous Chainlink round): the founder chose the reference spot at open, which is a fixed, already-stored value and also bounds paths 2 and 3. No guard (v0.1): a single bad Chainlink round settles a series at up to 75 % of collateral. No multiplier exception: rejected by the founder.
+
+**Why.** Closes THREAT-MODEL T-02.1 and bounds T-14.2 further. On the allowlist (mega-caps, SPY, QQQ) a 30 % move inside one week is a market event worth a 48 h human look; the cost of a false halt is a delayed, bounded resolution.
+
+**Recorded caveat on the exception.** Under ERC-8056 the Chainlink feed prices one raw token as share price × `uiMultiplier`, so a correctly sequenced split or dividend does not move `S` and passes the plain check. The exception can therefore only admit a price that moved by the multiplier ratio, which is precisely the feed/multiplier mis-sequencing of THREAT-MODEL T-10.2. Because D-026 refuses to open a series across a staged change, the exception can only apply to a change staged after open. The keeper alerts on any `UIMultiplierUpdated` inside a live series and the guardian pauses new auctions until that settlement has been reviewed. Revisit after the first observed corporate action on a live series.
+
+**Consequences.** SPEC §9.1, §9.2, §9.3, §9.6, §10.3; `OracleParams.jumpBps`; event `JumpGuardTripped`; invariant I-10.
+
+---
+
+## D-026 · 2026-09-02 · `openAuction` refuses a series that spans a staged multiplier change (RS-09)
+
+**Decision.** `openAuction` reverts with `MultiplierChangeInsideSeries` when `token.effectiveAt() != 0 && token.effectiveAt() ≤ expiry`.
+
+**Alternatives considered.** Keeper-only check: a forgotten check is exactly the failure mode. Adjusting the strike at settlement: rejected in D-002 (double counting).
+
+**Why.** Closes THREAT-MODEL T-10. Skipping one series around a corporate action costs a week of premium and avoids the only case where the feed can be transiently wrong by the split ratio.
+
+**Consequences.** SPEC §5 (a), §7.2, §10.3. Mock stock token needs settable `effectiveAt`.
+
+---
+
+## D-027 · 2026-09-02 · Curator floors on strike distance and reserve price; reserve floor is never zero (RS-11)
+
+**Decision.** Per vault and per series kind: `minStrikeDistanceBps[kind]` (defaults to the protocol lower bound 300 / 100, curator may raise within the protocol bounds) and `minReserveBpsOfSpot[kind]` (protocol range `[1, 500]`, defaults 10 bps WEEKDAY / 3 bps WEEKEND). `openAuction` enforces both. Defaults for the reserve floor are placeholders to be tuned against the implied-vol model before mainnet.
+
+**Alternatives considered.** Reserve floor default 0 (v0.1): a rogue or careless keeper could sell 3 %-OTM weekly calls for nothing. Protocol-wide floors only: asset classes differ too much (ETF weekend calls are worth a few bps).
+
+**Why.** Closes THREAT-MODEL T-13.1 and T-19. The curator is bonded; the keeper is a hot key.
+
+**Consequences.** SPEC §7.2, §8.3, §15 parameter list.
+
+---
+
+## D-028 · 2026-09-02 · `openAuction` is gated by `KEEPER_ROLE`; everything else in the lifecycle is permissionless
+
+**Decision.** Only `KEEPER_ROLE` may call `openAuction`. `clear`, `settle`, `halt`, `processDeposits/Redeems`, `flush`, `withdrawRefund`, `claimOptions`, `resolveHaltedByOracle` are permissionless. Role grant/revoke is timelocked.
+
+**Alternatives considered.** Permissionless `openAuction`: anyone could open with the minimum distance and reserve at any moment inside the tolerance window. Gating settlement too: would make liveness depend on the keeper key.
+
+**Why.** THREAT-MODEL T-13.4: the spec implied but did not state the gate. Liveness must never depend on the keeper; parameter choice must.
+
+**Consequences.** SPEC §2, §5, §7.2, §15.
+
+---
+
+## D-029 · 2026-09-02 · Second guardian key held off-server by the founder (RS-12, amends D-012)
+
+**Decision.** `GUARDIAN_ROLE` has two holders: the hot key on the keeper server (D-012) and a hardware-wallet or phone signer held by the founder, never on the server. Either can pause; either can unpause the other's pause.
+
+**Alternatives considered.** Hot key only (D-012): a compromised server holds both the keeper and the guardian key, so nobody can pause a rogue keeper during the 48 h it takes the timelock to revoke `KEEPER_ROLE`.
+
+**Why.** Closes the residual of THREAT-MODEL T-13 and T-15. Adds one role grant at deploy and no ceremony: the founder key is used only in an incident.
+
+**Consequences.** SPEC §2, §15. If OQ-001 (canceller) is ever adopted, the canceller must not be a guardian key.
+
+---
+
+## D-030 · 2026-09-02 · MM bond locks by participation, not by option-token balance (RS-08)
+
+**Decision.** `AuctionHouse.bid` calls `BondManager.lock(bidder, seriesId)` on the bidder's first bid in a series. The lock is released at `clear` for bidders with no fill and at SETTLED/RESOLVED for filled bidders. `withdrawBond` requires zero active locks plus the 7-day cooldown. Curator locks: one per live series of the curator's vault.
+
+**Alternatives considered.** "No unclaimed option tokens in LIVE series" (v0.1): escapable by transferring the tokens to another address, after which a manipulator (THREAT-MODEL T-03) has nothing at stake.
+
+**Why.** Closes T-07.6. Bonded bidders only mitigate griefing and manipulation if the bond is actually at stake for the life of the series.
+
+**Consequences.** SPEC §8.1, §13; events `BondLocked`, `BondUnlocked`; invariant I-13.
+
+---
+
+## D-031 · 2026-09-02 · Oracle parameters are snapshotted into the series at `openAuction` (RS-14)
+
+**Decision.** `Series.params` (`OracleParams`: `weekdayMaxStale`, `twapGrace`, `weekendTwapBoundBps`, `weekdayTwapBoundBps`, `swapNotionalUSDG`, `impactBps`, `minObservationsInWindow`, `jumpBps`, `sequencerFeed`, `sequencerGrace`, USDG band and staleness) is copied from vault configuration at open and never changes. A timelocked parameter change applies only to series opened after execution.
+
+**Alternatives considered.** Live parameters read at settle (v0.1): a change queued Monday executes Wednesday while the weekday series is LIVE and depositors have no exit until Friday's settlement, which the change itself governs.
+
+**Why.** Closes THREAT-MODEL T-14.1. Every vault is IDLE between series (at least the Sunday→Monday window), so depositors always get a withdrawal window between seeing a queued change and the first series it applies to. This is what makes the 48 h delay an actual protection.
+
+**Consequences.** SPEC §6, §9.1, §15; invariant I-12.
+
+---
+
+## D-032 · 2026-09-02 · `requestDeposit` allowed in any state; executes at the next IDLE; `openAuction` never requires an empty queue (RS-16, as amended by the founder)
+
+**Decision.** `requestDeposit` is allowed in every vault state. `processDeposits` runs whenever the vault is IDLE (share price is constant inside IDLE, I-8). `openAuction` executes up to `maxQueueOpsPerOpen` (50) queued deposits and then opens regardless of any remaining queue; the remainder executes at the next IDLE. `requestRedeem` stays outside-IDLE only (use `redeem` in IDLE).
+
+**Alternatives considered.** RS-16 as proposed (revert `requestDeposit` in IDLE). The founder chose to allow it in any state, which is simpler for integrators and equally removes the blocking condition, since `openAuction` no longer checks the queue at all.
+
+**Why.** Closes THREAT-MODEL T-18: with v0.1's "queue must be empty" rule, a dust request in the block before Monday 14:00 UTC reverted `openAuction` for the cost of gas, repeatably, on a 100 ms FCFS chain.
+
+**Consequences.** SPEC §4.3, §5 (a); invariant I-6 revised (queued deposit executions occur only in IDLE).
+
+---
+
+## D-033 · 2026-09-02 · Permissionless resolution of a halted series after 7 days, clamped into the resolution band (RS-15, as amended by the founder)
+
+**Decision.** `resolveHaltedByOracle(seriesId, roundHint)` is callable by anyone once `now ≥ expiry + haltedTimeout` (constant, 7 days). It takes the first valid Chainlink round after expiry (any lateness, verified with `prev`, `oraclePaused() == false`), clamps the answer into the D-022 band, sets `settlementPath = 5` and finishes settlement. Before the timeout only the timelock can resolve.
+
+**Alternatives considered.** RS-15 as proposed (reject if outside the band): could leave a series halted forever if the feed returns far from the reference and the admin key is lost; the founder chose clamping so resolution is always possible without any key. Timelock-only resolution (v0.1): loss of the single admin key plus one halt locked the vault permanently.
+
+**Why.** Closes THREAT-MODEL T-14.7 and T-11.6. Most halts are oracle outages that end within days; the admin should not be on the happy path, and its loss must not be fatal.
+
+**Consequences.** SPEC §9.6, §15 constants; event `SeriesResolvedByOracle`; invariants I-11, I-14.
+
+---
+
+## D-034 · 2026-09-02 · `sunset(vaultId)` migration path exists from day one; core stays immutable (THREAT-MODEL T-17)
+
+**Decision.** No proxies, no `delegatecall` in fund-holding contracts, every cross-contract reference `immutable`. `sunset(vaultId)` behind the timelock is irreversible: after the current series settles or resolves, the vault refuses `openAuction` forever, stays IDLE with `withdraw/redeem` open, and rejects new deposits. A v2 is a new deployment; the frontend offers withdraw-then-deposit.
+
+**Alternatives considered.** UUPS or transparent proxies behind the timelock: with a single admin EOA the proxy makes the key owner of all code, and T-14 shows live-series depositors have no exit; adds initializer and storage-layout risk; stacks a third layer of upgrade risk on top of the issuer's beacon and the chain's 7/8 council. Immutable without a sunset function: migration would rely on the guardian pause alone, which is reversible and not a signal.
+
+**Why.** THREAT-MODEL T-17. Migration is cheap here: single-asset ERC-4626 shares, no lock, weekly IDLE windows, 7-day bond cooldown.
+
+**Consequences.** SPEC §3, §15; event `VaultSunset`; invariant I-15; CI grep for proxy imports in `src/`.
