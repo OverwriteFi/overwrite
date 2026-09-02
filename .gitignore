@@ -1,0 +1,33 @@
+# secrets
+.env
+.env.*
+!.env.example
+
+# node
+node_modules/
+dist/
+.next/
+out/
+*.tsbuildinfo
+npm-debug.log*
+yarn-error.log*
+*.log
+
+# foundry
+cache/
+broadcast/
+out/
+
+# sqlite
+*.db
+*.db-shm
+*.db-wal
+
+# os / editors
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+
+# claude local overrides
+.claude/settings.local.json

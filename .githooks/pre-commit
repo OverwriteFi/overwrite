@@ -1,0 +1,33 @@
+#!/bin/sh
+# Blocks commits that stage anything resembling a private key.
+#   1. 0x followed by exactly 64 hex characters
+#   2. a *PRIVATE_KEY*= assignment with a non-empty value
+# Scans staged blob contents (not the working tree). Enable with:
+#   git config core.hooksPath .githooks
+
+status=0
+files=$(git diff --cached --name-only --diff-filter=ACM)
+[ -z "$files" ] && exit 0
+
+for f in $files; do
+  blob=$(git show ":$f" 2>/dev/null) || continue
+
+  hits=$(printf '%s\n' "$blob" | grep -nE '0x[0-9a-fA-F]{64}([^0-9a-fA-F]|$)' | head -3)
+  if [ -n "$hits" ]; then
+    echo "pre-commit: BLOCKED $f - looks like a private key (0x + 64 hex chars):"
+    echo "$hits" | sed 's/^/    /'
+    status=1
+  fi
+
+  hits=$(printf '%s\n' "$blob" | grep -nE 'PRIVATE_KEY[A-Za-z0-9_]*=["'"'"']?[^"'"'"'[:space:]]+' | head -3)
+  if [ -n "$hits" ]; then
+    echo "pre-commit: BLOCKED $f - non-empty private key assignment:"
+    echo "$hits" | sed 's/^/    /'
+    status=1
+  fi
+done
+
+if [ "$status" -ne 0 ]; then
+  echo "pre-commit: remove the secret (or move it to an untracked .env) and re-stage."
+fi
+exit $status
