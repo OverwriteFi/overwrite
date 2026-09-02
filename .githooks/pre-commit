@@ -10,6 +10,8 @@ files=$(git diff --cached --name-only --diff-filter=ACM)
 [ -z "$files" ] && exit 0
 
 for f in $files; do
+  # skip binary blobs (numstat prints "-" for them)
+  case "$(git diff --cached --numstat -- "$f" | cut -f1)" in -) continue ;; esac
   blob=$(git show ":$f" 2>/dev/null) || continue
 
   hits=$(printf '%s\n' "$blob" | grep -nE '0x[0-9a-fA-F]{64}([^0-9a-fA-F]|$)' | head -3)
