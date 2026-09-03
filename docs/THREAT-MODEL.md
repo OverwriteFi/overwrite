@@ -285,7 +285,7 @@ Format per threat: what is at risk, the scenario, severity and likelihood with t
 
 **Enforced by.**
 - `AuctionHouse.bid` / `clear`, `BondManager.lock/unlock/withdrawBond`, `OptionToken.mint`.
-- Tests: `Auction.t.sol::test_T07_bidWithoutEscrowReverts`, `test_T07_maxBidsPerAuctionAndPerBidder`, `test_T07_clearWithFrozenBidderDoesNotRevert` (mock USDG with `isFrozen`; asserts the pull-refund path once RS-06 is adopted), `test_T07_clearWithNonReceiverContractBidderDoesNotRevert` (RS-07), `test_T07_bondLockedUntilSeriesSettledEvenAfterTokenTransfer` (RS-08), `test_T07_clearGasUnder6M` with 64 bids, `testFuzz_T07_proRataMarginalFillConservesQty`; invariant **I-3**.
+- Tests (`contracts/test/AuctionHouse.threats.t.sol`, `AuctionHouse.fuzz.t.sol`, implemented 2026-09-03): `test_T07_bidWithoutEscrowReverts`, `test_T07_maxBidsPerAuctionAndPerBidder`, `test_T07_clearWithFrozenBidderDoesNotRevert` (mock USDG with `isFrozen`; pull-refund path, D-023), `test_T07_clearWithNonReceiverContractBidderDoesNotRevert` (D-024, payout via `claimPayout`), `test_T07_bondLockedUntilSeriesSettledEvenAfterTokenTransfer` (D-030), `test_T07_clearGasUnder6M` (64 distinct bidders: 4.09 M gas measured) and `test_T07_skipGasUnder6M` (2.04 M), `testFuzz_T07_proRataMarginalFillConservesQty`; invariants **I-3** (`invariant_I3_escrowExact`, `invariant_I3_closedConservation`, `invariant_I3_allocationIdentity`) and **I-13** (`invariant_I13_bondLocks`) in `test/invariants/AuctionInvariants.t.sol`.
 
 **Residual / recommendation.**
 - **RS-06** Pull-based refunds and payments: `clear` credits `refundable[bidder]`; bidders call `withdrawRefund`. Pull for fee forwarding too (`FeeRouter.collect` must not be able to revert `clear`).
@@ -331,7 +331,7 @@ Format per threat: what is at risk, the scenario, severity and likelihood with t
 
 **Scenario.**
 1. `payoutPerOption = (S − K) × 1e18 / S` must round **down** and be `< 1e18` (K > 0 guarantees strict). `payoutTotal = filledQty × payoutPerOption / 1e18` rounds down. Rounding errors favour the vault by design.
-2. Escrow `qty × price / 1e18` floors; payment `filled × clearingPrice / 1e18` floors; refund = escrow − payment. Because `clearingPrice ≤ price`, refund ≥ 0. Dust ≤ 1 unit (1e-6 USDG) per bid stays in the AuctionHouse; must not be double-counted in **I-3**.
+2. Escrow `qty × price / 1e18` floors; payment `filled × clearingPrice / 1e18` floors; refund = escrow − payment. Because `clearingPrice ≤ price`, refund ≥ 0. `premiumGross` is the sum of the floored payments (D-043), so the sub-unit dust stays with each bidder as refund, nothing accumulates in the AuctionHouse and **I-3** holds exactly (`testFuzz_T09_escrowRefundPaymentConserve`).
 3. Pro-rata marginal fills: `Σ fills ≤ remaining`, dust to the earliest `bidId`; must not exceed `offeredQty`.
 4. Strike grid: `grid = S_ref × 25 / 1e4`; `ceilDiv(K_raw, grid) × grid`. With 8-dec `S_ref`, `grid` ≥ 1 for any `S_ref ≥ 400` (i.e. $0.000004); a zero grid would divide by zero — guard `grid > 0`.
 5. Premium accumulator: `accPremiumPerShare += premiumNet × 1e18 / totalSupply()`. Shares carry a 6-dec offset so `totalSupply` is large and the truncation is tiny; `premiumDebt` bookkeeping in `_update` must be exact on mint, burn and transfer, including self-transfers and zero-value transfers.

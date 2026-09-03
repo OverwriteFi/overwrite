@@ -513,3 +513,77 @@ Format: ID · date · decision · alternatives considered · why · sources. New
 **Why.** SPEC §10.3 already said "inside `(now, expiry]`"; §5 and §7.2 were the inconsistent lines and are corrected.
 
 **Consequences.** SPEC §1.2 (AAPL reads), §5 (a), §7.2; `test_T10_pastEffectiveAtDoesNotBlockOpen`. All three vault-layer contracts also moved to `Ownable2Step` so a mistyped `transferOwnership` cannot orphan `setSunset`/`registerVault` (reviewer finding, CLAUDE.md rule 5).
+
+---
+
+## D-043 · 2026-09-03 · `premiumGross` is the sum of the floored per-bid payments, so escrow conservation is exact
+
+**Decision.** At clearing every filled bid pays `floor(filledQty_i × clearingPrice / 1e18)` and `premiumGross := Σ payments_i`; `fee = floor(premiumGross × feeBps / 1e4)`, `premiumNet = premiumGross − fee`. Therefore `Σ refund_i + premiumNet + fee == Σ escrow_i` to the unit, `USDG.balanceOf(AuctionHouse) == Σ open escrow + Σ refundable` exactly, and no USDG is ever stranded in the AuctionHouse.
+
+**Alternatives considered.** v0.3 wrote `premiumGross = filledQty × clearingPrice / 1e18` (§7.3, §8.2 step 5). That product exceeds the sum of the per-bid floors by up to `#filled bids − 1` units, which is where I-3's "sub-unit dust excluded" and T-09.2's "dust stays in the AuctionHouse" came from; paying the product would dip into other bidders' refunds.
+
+**Why.** An invariant that is exact is cheaper to test and impossible to mis-account; the difference is at most 63 × 1e-6 USDG per auction and stays with the bidders.
+
+**Consequences.** SPEC §7.3, §8.2 steps 5 and 7, §17 I-3; THREAT-MODEL T-09.2; `AuctionCleared.premiumGross` carries the sum; `testFuzz_T09_escrowRefundPaymentConserve`, `invariant_I3_escrowExact`, `invariant_I3_closedConservation`.
+
+---
+
+## D-044 · 2026-09-03 · `BondManager.auctionHouse` and `FeeRouter.auctionHouse` are set once after deployment
+
+**Decision.** The AuctionHouse holds `bondManager` and `feeRouter` as immutables; the two of them hold `auctionHouse` in a storage slot that the owner sets exactly once (`setAuctionHouse`, reverts `AlreadySet`; `lock/unlock/initVault/collect` revert `NotAuctionHouse` while unset, so mis-wiring fails at the first bid). Deployment order: BondManager, FeeRouter, AuctionHouse, `setAuctionHouse` on both, then the vaults (whose `auctionHouse` is immutable), then `AuctionHouse.registerVault`.
+
+**Alternatives considered.** (1) Predicting the AuctionHouse address with `vm.computeCreateAddress` and passing it as an immutable: fragile to a burned nonce. (2) An atomic deployer contract creating all three in one constructor: removes the window but adds a contract for one-off use. (3) Making the AuctionHouse side settable instead: rejected, it is the fund-holding contract.
+
+**Why.** Two immutables cannot point at each other. Set-once on the two admin-ish contracts is the same pattern as `OptionToken.registerVault` and `CapController.priceSource` (D-039).
+
+**Consequences.** SPEC §3 note on immutables; `test_setAuctionHouse_onceOnly`, `test_constructor_andWiring`; deploy script and fork test must assert the wiring.
+
+---
+
+## D-045 · 2026-09-03 · `clear` takes the skip path whenever `mintSeries` could not succeed; the vault never stays in AUCTION
+
+**Decision.** `clear(seriesId)` skips (all escrow refundable, all bond locks released, `vault.skipSeries`) in four cases: no bid; `min(offeredQty, totalAssets()) == 0`; `block.timestamp ≥ expiry`; the premium would be non-zero but every share is escrowed for redeem (`totalSupply() == balanceOf(vault)`, which would revert `NoSharesForPremium`). Otherwise the fill is bounded by `remaining = min(offeredQty, totalAssets())`, so an issuer burn between open and clear cannot revert `mintSeries` with `InsufficientCoverage`.
+
+**Alternatives considered.** Calling `mintSeries` with `premiumNet = 0` in the all-escrowed case: gives the MMs free options. Letting a late `clear` proceed after `expiry`: a weekend series cleared after Monday 15:00 UTC is guaranteed to halt (both oracle paths' deadlines passed) and a weekday one settles on a stale reference. Reverting in these cases: leaves the series in AUCTION forever, the exact liveness failure D-023/D-024 exist to prevent.
+
+**Why.** CLAUDE.md: "when unsure, choose the safer option". A skipped week costs one premium; a stuck vault costs everything.
+
+**Consequences.** SPEC §8.2 step 8 rewritten; `previewClear` returns `willSkip`; tests `test_clear_skipAfterExpiry`, `test_clear_skipWhenAllSharesEscrowed`, `test_clear_coverageCapAfterIssuerBurn`, `test_clear_skipWhenNothingCoverable`, `invariant_openAuctionMatchesVaultState`. Residual: a paused USDG makes `clear` revert until unpause (fee transfer and `mintSeries` pull); unavoidable and documented in §8.2 and `test_T12_clearWaitsForUsdgUnpause`.
+
+---
+
+## D-046 · 2026-09-03 · `auctionOpen = block.timestamp`; the weekend open window is anchored to Friday
+
+**Decision.** The keeper no longer supplies `auctionOpen`; `openAuction` uses `block.timestamp` and validates it against the §5 schedule with epoch-week arithmetic (`ws = now − now mod 604800`, epoch weeks start Thursday 00:00 UTC, so a Friday and the following Sunday share a week). WEEKDAY: `|off − Mon 14:00| ≤ openTolerance` (≤ 4 h) and `expiry − (ws + WEEK) ∈ [Fri 19:30, Fri 21:30]` (keeper still supplies expiry because of DST). WEEKEND: `off ∈ [Fri 19:40, Fri 21:40 + openTolerance]`, `expiry == ws + Sun 23:59:00`, and if the vault had a weekday series expiring this week, `now ≥ that expiry + 600 s`. No `expiry > lastExpiry` check: a skipped auction may be re-opened inside the same window (T-05.1).
+
+**Alternatives considered.** "`expiry mod week == Sun 23:59` and `expiry − now < 3 days`": lets a keeper open a weekend auction on Saturday night, a 3-hour option at the 100 bps floor with a 3 bps reserve (T-13/T-19). Keeper-supplied `auctionOpen`: one more value to validate for no benefit.
+
+**Why.** The window checks are the only thing standing between a hot keeper key and selling short-dated calls for nothing.
+
+**Consequences.** SPEC §5 (a), (d); `AuctionHouse.canOpen`, `scheduledExpiry`; `test_open_weekdayWindow`, `test_open_weekendStandaloneWindow`, `test_T13_weekendCannotOpenOutsideFridayWindow`, `test_T05_retryOpenAfterSkipInSameWindow`.
+
+---
+
+## D-047 · 2026-09-03 · `S_ref == S_cap` through `IPriceSource` until SettlementOracle ships; the D-031 snapshot waits for it
+
+**Decision.** `AuctionHouse.priceSource` is an `IPriceSource` settable by the owner (same exception as D-039). Until SettlementOracle implements the §7.2 reference-price rules (Chainlink ≤ 26 h, else TWAP within 15 %), `S_ref` is whatever `capPrice(vault)` returns. The `OracleParams` snapshot of D-031 is not taken by the AuctionHouse: there is no oracle configuration to copy yet. SettlementOracle will keep a versioned parameter history per vault and select the version by `auctions(seriesId).auctionOpen`, which is exposed for that purpose.
+
+**Alternatives considered.** A settlement hook called from `openAuction`: adds a cross-contract call inside a state transition for a contract that does not exist. Keeper-supplied strike: violates §7.2 "never keeper-supplied".
+
+**Why.** Keeps the AuctionHouse fully immutable except for the one temporary reference, and keeps I-12 satisfiable by construction (`auctionOpen` never changes).
+
+**Consequences.** SPEC §3 immutables note, §6 storage split (`params` moves to SettlementOracle), §7.2; OQ-004 in §18: freeze or redeploy once SettlementOracle exists.
+
+---
+
+## D-048 · 2026-09-03 · Pro-rata dust is carried across the marginal group in bidId order, each bid capped at its qty
+
+**Decision.** At the marginal price, `fill_i = floor(qty_i × remaining / total)`; the rounding dust goes to the earliest `bidId` of the group up to its remaining headroom, then to the next, and so on. Because `Σ (qty_i − fill_i) ≥ dust`, the carry always terminates inside the group and `Σ fills == remaining` exactly.
+
+**Alternatives considered.** SPEC v0.3 "dust to the earliest bidId" alone: with one large bid and many 0.1-option bids at the clearing price the earliest bid's headroom can be 1 unit while the dust is up to 63 units, so the earliest bid would be over-filled.
+
+**Why.** Deterministic, still favours the earliest bidder, never over-allocates (I-1).
+
+**Consequences.** SPEC §8.2 step 4; `testFuzz_T07_proRataMarginalFillConservesQty` (dust receivers form a prefix in bidId order), `test_clear_tieDustToEarliestBid`.
+
+Scope recorded with D-043…D-048: BondManager implements MM and curator bonds in USDG with participation locks, cooldown and timelock slashing; per-series curator locks (VaultFactory phase), the WRITE migration (D-007) and the off-chain attestation stay out. FeeRouter implements the USDG mode; `setFeeMode(WRITE)`, `depositWrite`, `withdrawWrite` revert `WriteNotLaunched` while `writePool == address(0)` (D-016). Measured 2026-09-03: `clear` with 64 distinct bidders and a marginal pro-rata group costs **4.09 M gas**, the skip path with 64 bids **2.04 M** (`test_T07_clearGasUnder6M`, `test_T07_skipGasUnder6M`, bound 6 M).
