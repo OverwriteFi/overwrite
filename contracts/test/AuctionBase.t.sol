@@ -66,7 +66,7 @@ abstract contract AuctionBaseTest is Test {
         opt = new OptionToken("", admin);
         bm = new BondManager(address(usdg), admin, treasury);
         fr = new FeeRouter(address(usdg), admin, treasury);
-        ah = new AuctionHouse(address(usdg), address(bm), address(fr), address(priceSource), admin);
+        ah = new AuctionHouse(address(usdg), address(bm), address(fr), address(priceSource), address(opt), admin);
         vault = new CoveredCallVault(
             CoveredCallVault.Config({
                 stock: address(stock),

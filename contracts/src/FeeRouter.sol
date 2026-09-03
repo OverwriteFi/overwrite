@@ -82,8 +82,8 @@ contract FeeRouter is IFeeRouter, Ownable2Step, ReentrancyGuard {
     }
 
     /// @inheritdoc IFeeRouter
-    /// @dev Pure bookkeeping: the USDG was transferred in by the caller beforehand. Never reverts on accounting,
-    /// so it can never block `clear` (D-023).
+    /// @dev Pure bookkeeping: the USDG stays in the AuctionHouse, which holds a standing approval for this
+    /// contract; `flush` pulls it. No transfer happens here, so nothing fee-side can revert `clear` (D-023, D-049).
     function collect(address vault, uint256 seriesId, uint256 amount) external onlyAuctionHouse {
         pending[vault] += amount;
         emit FeeCollected(vault, seriesId, amount, _mode[vault]);
@@ -92,13 +92,13 @@ contract FeeRouter is IFeeRouter, Ownable2Step, ReentrancyGuard {
     // ═════════════════════════════ permissionless ═════════════════════════════
 
     /// @inheritdoc IFeeRouter
-    /// @dev USDG mode only until the token launches: forwards the pending balance to `treasury`. A frozen
-    /// treasury makes only this call revert.
+    /// @dev USDG mode only until the token launches: pulls the pending balance from the AuctionHouse straight
+    /// to `treasury`. A frozen treasury (or a frozen AuctionHouse) makes only this call revert.
     function flush(address vault) external nonReentrant returns (uint256 amount) {
         amount = pending[vault];
         if (amount == 0) revert NothingToFlush();
         pending[vault] = 0;
-        usdg.safeTransfer(treasury, amount);
+        usdg.safeTransferFrom(auctionHouse, treasury, amount);
         emit FeeFlushed(vault, treasury, amount);
     }
 

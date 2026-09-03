@@ -35,7 +35,8 @@ contract BondManager is IBondManager, Ownable2Step, ReentrancyGuard {
 
     mapping(address account => mapping(BondKind kind => uint256)) internal _bond;
     mapping(address account => mapping(BondKind kind => uint64)) internal _unlockAt;
-    /// @notice Number of series in which `account` currently has a locked bond (SPEC §16.2, I-13).
+    /// @notice Number of series in which `account` currently has a locked MM bond (SPEC §16.2, I-13). Gates the
+    /// MM bond only; curator locks (one per live series of the curator's vault) arrive with VaultFactory (D-049).
     mapping(address account => uint256) public activeLocks;
     mapping(address account => mapping(uint256 seriesId => bool)) public isLocked;
 
@@ -101,7 +102,7 @@ contract BondManager is IBondManager, Ownable2Step, ReentrancyGuard {
     function requestWithdraw(BondKind kind) external nonReentrant returns (uint64 unlockAt) {
         if (_bond[msg.sender][kind] == 0) revert NoBond();
         if (_unlockAt[msg.sender][kind] != 0) revert WithdrawalPending();
-        if (activeLocks[msg.sender] != 0) revert Locked(activeLocks[msg.sender]);
+        if (kind == BondKind.MM && activeLocks[msg.sender] != 0) revert Locked(activeLocks[msg.sender]);
         unlockAt = uint64(block.timestamp) + BOND_COOLDOWN;
         _unlockAt[msg.sender][kind] = unlockAt;
         emit BondWithdrawRequested(msg.sender, kind, unlockAt);
@@ -119,7 +120,7 @@ contract BondManager is IBondManager, Ownable2Step, ReentrancyGuard {
         uint64 unlockAt = _unlockAt[msg.sender][kind];
         if (unlockAt == 0) revert NoWithdrawalPending();
         if (block.timestamp < unlockAt) revert CooldownActive(unlockAt);
-        if (activeLocks[msg.sender] != 0) revert Locked(activeLocks[msg.sender]);
+        if (kind == BondKind.MM && activeLocks[msg.sender] != 0) revert Locked(activeLocks[msg.sender]);
         amount = _bond[msg.sender][kind];
         if (amount == 0) revert NoBond();
         _bond[msg.sender][kind] = 0;

@@ -3,8 +3,12 @@ pragma solidity 0.8.26;
 
 import {AuctionBaseTest} from "./AuctionBase.t.sol";
 import {AuctionHouse} from "../src/AuctionHouse.sol";
+import {BondManager} from "../src/BondManager.sol";
+import {FeeRouter} from "../src/FeeRouter.sol";
 import {CoveredCallVault} from "../src/CoveredCallVault.sol";
 import {OptionToken} from "../src/OptionToken.sol";
+import {MockUSDG} from "../src/mocks/MockUSDG.sol";
+import {MockStockToken} from "../src/mocks/MockStockToken.sol";
 import {IAuctionHouse} from "../src/interfaces/IAuctionHouse.sol";
 import {IBondManager} from "../src/interfaces/IBondManager.sol";
 import {ICoveredCallVault} from "../src/interfaces/ICoveredCallVault.sol";
@@ -27,7 +31,8 @@ contract AuctionHouseTest is AuctionBaseTest {
 
     function test_registerVault_defaults() public view {
         assertTrue(ah.isVault(address(vault)));
-        assertEq(address(ah.optionTokenOf(address(vault))), address(opt));
+        assertEq(address(ah.optionToken()), address(opt));
+        assertEq(address(vault.optionToken()), address(opt));
         assertEq(ah.minStrikeDistanceBps(address(vault), SeriesKind.WEEKDAY), 300);
         assertEq(ah.minStrikeDistanceBps(address(vault), SeriesKind.WEEKEND), 100);
         assertEq(ah.minReserveBpsOfSpot(address(vault), SeriesKind.WEEKDAY), 10);
@@ -358,6 +363,22 @@ contract AuctionHouseTest is AuctionBaseTest {
         vm.prank(mm2);
         vm.expectRevert(AuctionHouse.AuctionClosed.selector);
         ah.bid(id, 1e18, 2e6);
+        ah.clear(id);
+        vm.prank(mm2);
+        vm.expectRevert(
+            abi.encodeWithSelector(AuctionHouse.WrongAuctionState.selector, IAuctionHouse.AuctionState.CLEARED)
+        );
+        ah.bid(id, 1e18, 2e6);
+    }
+
+    function test_bid_onSkippedAuctionReverts() public {
+        uint256 id = _openDefault();
+        _clear(id); // no bids → SKIPPED
+        vm.prank(mm1);
+        vm.expectRevert(
+            abi.encodeWithSelector(AuctionHouse.WrongAuctionState.selector, IAuctionHouse.AuctionState.SKIPPED)
+        );
+        ah.bid(id, 1e18, 2e6);
     }
 
     function test_bid_zeroEscrowReverts() public {
@@ -418,8 +439,8 @@ contract AuctionHouseTest is AuctionBaseTest {
         assertEq(ah.claimableOptions(id, mm1), 50e18);
         assertEq(usdg.balanceOf(address(vault)), 90e6, "net premium pulled by the vault");
         assertEq(fr.pending(address(vault)), 10e6);
-        assertEq(usdg.balanceOf(address(fr)), 10e6);
-        assertEq(usdg.balanceOf(address(ah)), 0);
+        assertEq(usdg.balanceOf(address(fr)), 0, "fee is pulled by flush, never pushed (D-049)");
+        assertEq(usdg.balanceOf(address(ah)), 10e6);
         assertEq(uint256(vault.state()), uint256(VaultState.LIVE));
         assertEq(vault.series(id).filledQty, 50e18);
         assertEq(vault.premiumClaimable(alice), 90e6);
@@ -454,7 +475,7 @@ contract AuctionHouseTest is AuctionBaseTest {
         assertEq(ah.refundable(mm1), 60e6, "paid 120 at the uniform price, escrowed 180");
         assertEq(ah.refundable(mm2), 40e6);
         assertEq(ah.refundable(mm3), 90e6);
-        assertEq(usdg.balanceOf(address(ah)), 190e6, "I-3: balance == sum of refundable");
+        assertEq(usdg.balanceOf(address(ah)), 190e6 + 20e6, "I-3: balance == sum of refundable + pending fee");
         assertTrue(bm.isLocked(mm1, id));
         assertTrue(bm.isLocked(mm2, id));
         assertFalse(bm.isLocked(mm3, id), "unfilled bidder unlocked at clear");
@@ -609,8 +630,11 @@ contract AuctionHouseTest is AuctionBaseTest {
         _bid(mm3, id, 60e18, 1.5e6); // unfilled
         _clear(id);
         vm.prank(mm3);
-        vm.expectRevert(AuctionHouse.ZeroAddress.selector);
+        vm.expectRevert(AuctionHouse.InvalidRecipient.selector);
         ah.withdrawRefund(address(0));
+        vm.prank(mm3);
+        vm.expectRevert(AuctionHouse.InvalidRecipient.selector);
+        ah.withdrawRefund(address(ah));
         vm.expectEmit(true, true, false, true);
         emit AuctionHouse.RefundWithdrawn(mm3, bob, 90e6);
         vm.prank(mm3);
@@ -621,7 +645,7 @@ contract AuctionHouseTest is AuctionBaseTest {
         vm.prank(mm3);
         vm.expectRevert(AuctionHouse.NothingToClaim.selector);
         ah.withdrawRefund(bob);
-        assertEq(usdg.balanceOf(address(ah)), 60e6, "mm1's refund (180 escrow - 60 x 2) still parked");
+        assertEq(usdg.balanceOf(address(ah)), 60e6 + 20e6, "mm1's refund (180 - 60 x 2) plus the pending fee");
         assertEq(ah.refundable(mm1), 60e6);
         assertEq(ah.refundable(mm2), 0);
     }
@@ -681,8 +705,11 @@ contract AuctionHouseTest is AuctionBaseTest {
         vm.expectRevert(AuctionHouse.NothingToClaim.selector);
         ah.claimPayout(id, bob);
         vm.prank(mm1);
-        vm.expectRevert(AuctionHouse.ZeroAddress.selector);
+        vm.expectRevert(AuctionHouse.InvalidRecipient.selector);
         ah.claimPayout(id, address(0));
+        vm.prank(mm1);
+        vm.expectRevert(AuctionHouse.InvalidRecipient.selector);
+        ah.claimPayout(id, address(ah));
     }
 
     function test_claimPayout_otm() public {
@@ -819,13 +846,166 @@ contract AuctionHouseTest is AuctionBaseTest {
 
     function test_constructor_zeroAddress() public {
         vm.expectRevert(AuctionHouse.ZeroAddress.selector);
-        new AuctionHouse(address(0), address(bm), address(fr), address(priceSource), admin);
+        new AuctionHouse(address(0), address(bm), address(fr), address(priceSource), address(opt), admin);
         vm.expectRevert(AuctionHouse.ZeroAddress.selector);
-        new AuctionHouse(address(usdg), address(0), address(fr), address(priceSource), admin);
+        new AuctionHouse(address(usdg), address(0), address(fr), address(priceSource), address(opt), admin);
         vm.expectRevert(AuctionHouse.ZeroAddress.selector);
-        new AuctionHouse(address(usdg), address(bm), address(0), address(priceSource), admin);
+        new AuctionHouse(address(usdg), address(bm), address(0), address(priceSource), address(opt), admin);
         vm.expectRevert(AuctionHouse.ZeroAddress.selector);
-        new AuctionHouse(address(usdg), address(bm), address(fr), address(0), admin);
+        new AuctionHouse(address(usdg), address(bm), address(fr), address(0), address(opt), admin);
+        vm.expectRevert(AuctionHouse.ZeroAddress.selector);
+        new AuctionHouse(address(usdg), address(bm), address(fr), address(priceSource), address(0), admin);
+    }
+
+    /// D-049: a BondManager or FeeRouter on another USDG is rejected at construction.
+    function test_constructor_rejectsMiswiredUsdg() public {
+        MockUSDG usdg2 = new MockUSDG();
+        BondManager bm2 = new BondManager(address(usdg2), admin, treasury);
+        FeeRouter fr2 = new FeeRouter(address(usdg2), admin, treasury);
+        vm.expectRevert(abi.encodeWithSelector(AuctionHouse.Miswired.selector, bytes32("BOND_MANAGER_USDG")));
+        new AuctionHouse(address(usdg), address(bm2), address(fr), address(priceSource), address(opt), admin);
+        vm.expectRevert(abi.encodeWithSelector(AuctionHouse.Miswired.selector, bytes32("FEE_ROUTER_USDG")));
+        new AuctionHouse(address(usdg), address(bm), address(fr2), address(priceSource), address(opt), admin);
+        assertEq(usdg.allowance(address(ah), address(fr)), type(uint256).max, "standing approval for flush");
+    }
+
+    /// D-049 (review H-1): series ids come from one OptionToken counter, so a vault on another OptionToken
+    /// would collide with a live auction; it is rejected at registration.
+    function test_registerVault_rejectsForeignOptionToken() public {
+        OptionToken opt2 = new OptionToken("", admin);
+        CoveredCallVault foreign = _newVault(address(stock), address(usdg), address(opt2), address(ah));
+        vm.prank(admin);
+        vm.expectRevert(abi.encodeWithSelector(AuctionHouse.WrongOptionToken.selector, address(foreign), address(opt2)));
+        ah.registerVault(address(foreign));
+    }
+
+    /// D-049 (review L-2): a vault on another USDG, or a BondManager / FeeRouter not wired to this AuctionHouse,
+    /// is rejected at registration instead of failing at the first bid or clear.
+    function test_registerVault_rejectsMiswiring() public {
+        MockUSDG usdg2 = new MockUSDG();
+        CoveredCallVault wrongUsdg = _newVault(address(stock), address(usdg2), address(opt), address(ah));
+        vm.prank(admin);
+        vm.expectRevert(abi.encodeWithSelector(AuctionHouse.Miswired.selector, bytes32("VAULT_USDG")));
+        ah.registerVault(address(wrongUsdg));
+
+        BondManager bm2 = new BondManager(address(usdg), admin, treasury); // auctionHouse never set
+        FeeRouter fr2 = new FeeRouter(address(usdg), admin, treasury);
+        AuctionHouse ah2 =
+            new AuctionHouse(address(usdg), address(bm2), address(fr2), address(priceSource), address(opt), admin);
+        CoveredCallVault v2 = _newVault(address(stock), address(usdg), address(opt), address(ah2));
+        vm.prank(admin);
+        vm.expectRevert(abi.encodeWithSelector(AuctionHouse.Miswired.selector, bytes32("BOND_MANAGER")));
+        ah2.registerVault(address(v2));
+        vm.prank(admin);
+        bm2.setAuctionHouse(address(ah2));
+        vm.prank(admin);
+        vm.expectRevert(abi.encodeWithSelector(AuctionHouse.Miswired.selector, bytes32("FEE_ROUTER")));
+        ah2.registerVault(address(v2));
+        vm.prank(admin);
+        fr2.setAuctionHouse(address(ah2));
+        vm.prank(admin);
+        ah2.registerVault(address(v2));
+        assertTrue(ah2.isVault(address(v2)));
+    }
+
+    /// Two vaults on the same OptionToken get distinct series ids and clear independently.
+    function test_twoVaultsOneOptionToken() public {
+        MockStockToken stock2 = new MockStockToken("Mock SPY", "SPY", admin);
+        CoveredCallVault v2 = _newVault(address(stock2), address(usdg), address(opt), address(ah));
+        vm.startPrank(admin);
+        opt.registerVault(address(stock2), address(v2));
+        cap.setCapUSD(address(v2), BIG_CAP);
+        ah.registerVault(address(v2));
+        stock2.mint(bob, 50e18);
+        vm.stopPrank();
+        priceSource.set(address(v2), 500e8, true);
+        vm.startPrank(bob);
+        stock2.approve(address(v2), type(uint256).max);
+        v2.deposit(50e18, bob);
+        vm.stopPrank();
+
+        uint256 id1 = _openDefault();
+        uint64 exp = _fridayExpiry();
+        vm.prank(keeper);
+        uint256 id2 = ah.openAuction(address(v2), SeriesKind.WEEKDAY, exp, 500, 3e6);
+        assertEq(id1, 1);
+        assertEq(id2, 2);
+        assertEq(ah.auctions(id2).vault, address(v2));
+        assertEq(ah.auctions(id2).offeredQty, 50e18);
+        assertEq(ah.auctions(id2).strike, ah.computeStrike(500e8, 500));
+        _bid(mm1, id1, 100e18, 2e6);
+        _bid(mm2, id2, 50e18, 4e6);
+        _clear(id1);
+        _clear(id2);
+        assertEq(ah.claimableOptions(id1, mm1), 100e18);
+        assertEq(ah.claimableOptions(id2, mm2), 50e18);
+        assertEq(uint256(vault.state()), uint256(VaultState.LIVE));
+        assertEq(uint256(v2.state()), uint256(VaultState.LIVE));
+        assertEq(usdg.balanceOf(address(vault)), 180e6);
+        assertEq(usdg.balanceOf(address(v2)), 180e6);
+    }
+
+    /// D-049: the fee rate is snapshotted at open; a later timelocked change does not touch the running auction.
+    function test_clear_feeBpsSnapshottedAtOpen() public {
+        uint256 id = _openDefault();
+        assertEq(ah.auctions(id).feeBps, 1000);
+        vm.prank(admin);
+        fr.setFeeBps(address(vault), 2000);
+        _bid(mm1, id, 50e18, 2e6);
+        (,,, uint256 fee) = _clear(id);
+        assertEq(fee, 10e6, "old rate applies");
+        uint256 id2 = _reopenNextMonday();
+        assertEq(ah.auctions(id2).feeBps, 2000, "new rate from the next open");
+    }
+
+    /// A HALTED series resolved by the timelock path (4) releases locks and pays allocations like a settled one.
+    function test_haltedThenResolved_claimsAndLocks() public {
+        uint256 id = _openDefault();
+        _bid(mm1, id, 50e18, 2e6);
+        _bid(mm2, id, 50e18, 2e6);
+        _clear(id);
+        vm.warp(vault.series(id).expiry);
+        vm.prank(settlement);
+        vault.haltSeries(id, "NO_PRICE");
+        vm.expectRevert(abi.encodeWithSelector(AuctionHouse.SeriesNotSettled.selector, SeriesState.HALTED));
+        ah.releaseLocks(id);
+        vm.prank(mm1);
+        ah.claimOptions(id, mm1); // allowed while HALTED
+        vm.prank(mm2);
+        vm.expectRevert(abi.encodeWithSelector(OptionToken.NotSettled.selector, id));
+        ah.claimPayout(id, mm2);
+        vm.prank(settlement);
+        vault.settleSeries(id, 250e8, 4); // timelock resolution
+        assertEq(uint256(vault.series(id).state), uint256(SeriesState.RESOLVED));
+        vm.prank(mm2);
+        (, uint256 tokens) = ah.claimPayout(id, mm2);
+        assertEq(tokens, 50e18 * 0.136e18 / WAD);
+        ah.releaseLocks(id);
+        assertEq(bm.activeLocks(mm1) + bm.activeLocks(mm2), 0);
+    }
+
+    function _newVault(address stock_, address usdg_, address opt_, address ah_) internal returns (CoveredCallVault) {
+        return new CoveredCallVault(
+            CoveredCallVault.Config({
+                stock: stock_,
+                usdg: usdg_,
+                optionToken: opt_,
+                auctionHouse: ah_,
+                settlement: settlement,
+                riskModule: address(risk),
+                capController: address(cap),
+                owner: admin,
+                name: "v",
+                symbol: "v"
+            })
+        );
+    }
+
+    /// @dev Settles the current series OTM and opens a fresh weekday auction the following Monday.
+    function _reopenNextMonday() internal returns (uint256 id) {
+        _settle(vault.currentSeriesId(), 100e8);
+        vm.warp(_nextMonday1400(block.timestamp));
+        id = _openDefault();
     }
 
     function test_supportsInterface() public view {
@@ -876,13 +1056,9 @@ contract AuctionHouseTest is AuctionBaseTest {
         fr.flush(address(vault));
         assertEq(usdg.balanceOf(treasury), 20e6);
 
-        // mm1 leaves: request, cooldown, withdraw
+        // mm1 leaves: request now, withdraw after the cooldown (below)
         vm.prank(mm1);
-        bm.requestWithdraw(IBondManager.BondKind.MM);
-        vm.warp(block.timestamp + 7 days);
-        vm.prank(mm1);
-        assertEq(bm.withdrawBond(IBondManager.BondKind.MM), BOND);
-        vm.warp(block.timestamp - 7 days);
+        uint64 unlockAt = bm.requestWithdraw(IBondManager.BondKind.MM);
 
         // Friday 20:10: weekend auction on the remaining balance
         vm.warp(vault.series(id).expiry + 600);
@@ -899,5 +1075,10 @@ contract AuctionHouseTest is AuctionBaseTest {
         vm.warp(_nextMonday1400(block.timestamp));
         uint256 id3 = _openDefault();
         assertEq(id3, 3);
+
+        // mm1's cooldown ends the following Friday
+        vm.warp(unlockAt);
+        vm.prank(mm1);
+        assertEq(bm.withdrawBond(IBondManager.BondKind.MM), BOND);
     }
 }

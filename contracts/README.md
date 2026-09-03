@@ -47,7 +47,7 @@ test/
 
 Foundry gotcha that bit this codebase more than five times: `vm.prank(x)` and `vm.expectRevert(...)` apply to the **very next call**, and a view read such as `vault.currentSeriesId()`, `ah.KEEPER_ROLE()` or `usdg.balanceOf(x)` inside the argument list counts. Read arguments into locals first. `vm.expectEmit` has the same shape: put it right before the emitting call, not before a helper that makes a view call or a mint first.
 
-Deployment order (D-044): BondManager and FeeRouter first, then AuctionHouse (holds them as immutables), then `setAuctionHouse` on both, then each vault with `auctionHouse = AuctionHouse` (immutable), then `AuctionHouse.registerVault(vault)` and `setKeeper`.
+Deployment order (D-044, D-049): OptionToken, BondManager and FeeRouter first, then AuctionHouse (holds all three as immutables and asserts the USDG of the two), then `setAuctionHouse` on BondManager and FeeRouter, then each vault with `auctionHouse = AuctionHouse` and the same OptionToken (both immutable), then `AuctionHouse.registerVault(vault)` (asserts the wiring, rejects any other OptionToken) and `setKeeper`. One AuctionHouse serves exactly one OptionToken.
 
 Not yet built (next phases): SettlementOracle (owns the §9 oracle policy, implements `IPriceSource` for both CapController and AuctionHouse, takes over the D-031 parameter snapshot), RiskModule, VaultFactory, deploy script + fork test asserting the wiring. WRITE mode of FeeRouter and the WRITE bond migration are post-token.
 

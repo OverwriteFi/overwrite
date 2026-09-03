@@ -142,6 +142,24 @@ contract BondManagerTest is Test {
         assertFalse(bm.hasActiveMMBond(mm), "pending withdrawal is not active");
     }
 
+    /// D-049: MM participation locks gate the MM bond only; the curator bond of the same account is unaffected.
+    function test_locks_gateMMBondOnly() public {
+        _post();
+        vm.prank(mm);
+        bm.postBond(CURATOR);
+        vm.prank(ah);
+        bm.lock(mm, 1);
+        vm.prank(mm);
+        vm.expectRevert(abi.encodeWithSelector(BondManager.Locked.selector, 1));
+        bm.requestWithdraw(MM);
+        vm.prank(mm);
+        uint64 unlockAt = bm.requestWithdraw(CURATOR);
+        vm.warp(unlockAt);
+        vm.prank(mm);
+        assertEq(bm.withdrawBond(CURATOR), CURATOR_BOND);
+        assertTrue(bm.hasActiveMMBond(mm), "MM bond untouched");
+    }
+
     function test_requestWithdraw_reverts() public {
         vm.prank(mm);
         vm.expectRevert(BondManager.NoBond.selector);

@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: MIT
 pragma solidity 0.8.26;
 
+import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
+
 /// @notice Curator and market-maker bonds (SPEC §13, D-030). Locks are by participation: the AuctionHouse
 /// locks a bidder's bond on its first bid in a series and releases it at clear (no fill) or after settlement.
 interface IBondManager {
@@ -9,6 +11,8 @@ interface IBondManager {
         MM
     }
 
+    function usdg() external view returns (IERC20);
+    function auctionHouse() external view returns (address);
     function hasActiveMMBond(address account) external view returns (bool);
     function activeLocks(address account) external view returns (uint256);
     function isLocked(address account, uint256 seriesId) external view returns (bool);

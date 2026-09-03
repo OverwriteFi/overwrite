@@ -24,11 +24,13 @@ contract FeeRouterTest is Test {
         fr.setAuctionHouse(ah);
         vm.prank(ah);
         fr.initVault(vault);
+        vm.prank(ah);
+        usdg.approve(address(fr), type(uint256).max); // the AuctionHouse constructor grants this (D-049)
     }
 
-    /// @dev Models `AuctionHouse.clear`: transfer the fee in, then book it.
+    /// @dev Models `AuctionHouse.clear`: the fee stays in the AuctionHouse, only the booking happens here.
     function _collect(uint256 seriesId, uint256 amount) internal {
-        usdg.mint(address(fr), amount);
+        usdg.mint(ah, amount);
         vm.prank(ah);
         fr.collect(vault, seriesId, amount);
     }
@@ -69,7 +71,7 @@ contract FeeRouterTest is Test {
         vm.prank(other);
         vm.expectRevert(FeeRouter.NotAuctionHouse.selector);
         fr.collect(vault, 1, 1);
-        usdg.mint(address(fr), 10e6);
+        usdg.mint(ah, 10e6);
         vm.expectEmit(true, true, false, true);
         emit FeeRouter.FeeCollected(vault, 1, 10e6, IFeeRouter.FeeMode.USDG);
         vm.prank(ah);
@@ -77,6 +79,23 @@ contract FeeRouterTest is Test {
         _collect(2, 5e6);
         assertEq(fr.pending(vault), 15e6);
         assertEq(usdg.balanceOf(treasury), 0, "nothing forwarded yet");
+        assertEq(usdg.balanceOf(address(fr)), 0, "the router never holds USDG");
+        assertEq(usdg.balanceOf(ah), 15e6);
+    }
+
+    /// D-049: `flush` pulls from the AuctionHouse; a frozen router address is irrelevant, a revoked approval or
+    /// a short AuctionHouse balance makes only `flush` revert and leaves `pending` intact.
+    function test_flush_pullsFromAuctionHouse() public {
+        _collect(1, 5e6);
+        usdg.setFrozen(address(fr), true);
+        fr.flush(vault);
+        assertEq(usdg.balanceOf(treasury), 5e6);
+        _collect(2, 5e6);
+        vm.prank(ah);
+        usdg.approve(address(fr), 0);
+        vm.expectRevert();
+        fr.flush(vault);
+        assertEq(fr.pending(vault), 5e6, "booking survives a failed flush");
     }
 
     function test_flush_forwardsAndReverts() public {
@@ -164,6 +183,7 @@ contract FeeRouterTest is Test {
         }
         assertEq(collected, flushed + fr.pending(vault));
         assertEq(usdg.balanceOf(treasury), flushed);
-        assertEq(usdg.balanceOf(address(fr)), fr.pending(vault));
+        assertEq(usdg.balanceOf(ah), fr.pending(vault), "pending fees sit in the AuctionHouse");
+        assertEq(usdg.balanceOf(address(fr)), 0);
     }
 }

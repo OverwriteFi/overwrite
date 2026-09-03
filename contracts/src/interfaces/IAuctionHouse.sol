@@ -29,6 +29,7 @@ interface IAuctionHouse {
         uint128 filledQty;
         uint128 premiumGross; // Σ per-bid payments, floored (D-043)
         uint128 fee;
+        uint16 feeBps; // snapshot of FeeRouter.feeBps(vault) at open (D-049)
     }
 
     struct Bid {

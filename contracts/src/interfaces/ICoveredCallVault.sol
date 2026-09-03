@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: MIT
 pragma solidity 0.8.26;
 
+import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {SeriesKind, SeriesState, VaultState} from "../Types.sol";
 import {IOptionToken} from "./IOptionToken.sol";
 
@@ -39,6 +40,7 @@ interface ICoveredCallVault {
     // Views
     function auctionHouse() external view returns (address);
     function optionToken() external view returns (IOptionToken);
+    function usdg() external view returns (IERC20);
     function state() external view returns (VaultState);
     function currentSeriesId() external view returns (uint256);
     function series(uint256 seriesId) external view returns (VaultSeries memory);

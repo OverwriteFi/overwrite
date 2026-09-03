@@ -10,7 +10,7 @@ import {Math} from "@openzeppelin/contracts/utils/math/Math.sol";
 
 /// @dev Exposes the pure clearing math (SPEC §8.2 steps 1-4) for direct fuzzing.
 contract ClearingHarness is AuctionHouse {
-    constructor(address u, address b, address f, address p, address o) AuctionHouse(u, b, f, p, o) {}
+    constructor(address u, address b, address f, address p, address t, address o) AuctionHouse(u, b, f, p, t, o) {}
 
     function compute(uint256[] memory qty, uint256[] memory price, uint256 remaining)
         external
@@ -32,7 +32,7 @@ contract AuctionHouseFuzzTest is AuctionBaseTest {
 
     function setUp() public override {
         super.setUp();
-        h = new ClearingHarness(address(usdg), address(bm), address(fr), address(priceSource), admin);
+        h = new ClearingHarness(address(usdg), address(bm), address(fr), address(priceSource), address(opt), admin);
         pool = [mm1, mm2, mm3, mm4, _newMM("mm5"), _newMM("mm6"), _newMM("mm7"), _newMM("mm8")];
     }
 
@@ -216,10 +216,10 @@ contract AuctionHouseFuzzTest is AuctionBaseTest {
             assertEq(bm.isLocked(pool[i], id), c > 0, "locked iff filled");
         }
         assertEq(sumRefundable, sumRefunds);
-        assertEq(usdg.balanceOf(address(ah)), sumRefundable, "I-3: balance == refundable");
+        assertEq(usdg.balanceOf(address(ah)), sumRefundable + fee, "I-3: balance == refundable + fee pending");
         assertEq(usdg.balanceOf(address(vault)), gross - fee, "vault holds premiumNet");
         assertEq(fr.pending(address(vault)), fee);
-        assertEq(usdg.balanceOf(address(fr)), fee);
+        assertEq(usdg.balanceOf(address(fr)), 0, "router holds nothing until flush");
         assertEq(sumClaimable, filled, "allocation identity");
         assertEq(vault.series(id).filledQty, filled);
         assertEq(uint256(vault.state()), uint256(VaultState.LIVE));

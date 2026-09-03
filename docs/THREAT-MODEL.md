@@ -348,7 +348,7 @@ Format per threat: what is at risk, the scenario, severity and likelihood with t
 
 **Enforced by.**
 - `CoveredCallVault`, `AuctionHouse`, `SettlementOracle`, `CapController`.
-- Tests: `testFuzz_T09_payoutPerOptionLtWadAndMonotoneInS`, `testFuzz_T09_payoutTotalNeverExceedsFilledQty`, `testFuzz_T09_escrowRefundPaymentConserve` (I-3 in fuzz form), `testFuzz_T09_proRataFillsSumToRemaining`, `testFuzz_T09_strikeGridRoundsUpAtMostOneStep`, `test_T09_gridZeroReverts`, `testFuzz_T09_premiumAccumulatorConservation` (random mints, burns, transfers, clears; assert I-4), `testFuzz_T09_capCheckUnits`, `testFuzz_T09_tickToPrice8_roundTrip`, `test_T09_negativeTickRoundsTowardNegInfinity`; invariants **I-1**, **I-2**, **I-3**, **I-4**, **I-8**.
+- Tests: `testFuzz_T09_payoutPerOptionLtWadAndMonotoneInS`, `testFuzz_T09_payoutTotalNeverExceedsFilledQty`, `testFuzz_T09_escrowRefundPaymentConserve` (I-3 in fuzz form), `testFuzz_T07_proRataMarginalFillConservesQty` (Σ fills == remaining, dust prefix), `testFuzz_T09_strikeGridRoundsUpAtMostOneStep`, `test_T09_gridZeroReverts`, `testFuzz_T09_premiumAccumulatorConservation` (random mints, burns, transfers, clears; assert I-4), `testFuzz_T09_capCheckUnits`, `testFuzz_T09_tickToPrice8_roundTrip`, `test_T09_negativeTickRoundsTowardNegInfinity`; invariants **I-1**, **I-2**, **I-3**, **I-4**, **I-8**.
 
 **Residual.** Dust in AuctionHouse and vault (sub-unit USDG) is accepted and must be excluded from the conservation invariants explicitly (I-4 already says "unsettled accumulator dust").
 
@@ -424,7 +424,7 @@ Format per threat: what is at risk, the scenario, severity and likelihood with t
 
 **Enforced by.**
 - `SettlementOracle._usdgOk`, `CoveredCallVault.claimPremium`, `AuctionHouse` (pull refunds per RS-06), `FeeRouter.collect` (must not revert `clear`).
-- Tests: `Usdg.t.sol::test_T12_twapInvalidOutsideBand`, `test_T12_twapInvalidWhenStale`, `test_T12_weekendFallsToPath3OnDepeg`, `test_T12_weekdayHaltsOnDepegWhenTwapIsLastPath`, `test_T12_clearSucceedsWhenFeeTransferReverts`, `test_T12_settleSucceedsWhenUsdgPaused`; invariant **I-9**; fork test `Fork_Usdg.t.sol::test_T12_measureUsdgFeedCadence` that prints round timestamps for the last 14 days (informational, gates the parameter choice).
+- Tests: `Usdg.t.sol::test_T12_twapInvalidOutsideBand`, `test_T12_twapInvalidWhenStale`, `test_T12_weekendFallsToPath3OnDepeg`, `test_T12_weekdayHaltsOnDepegWhenTwapIsLastPath`, `AuctionHouse.threats.t.sol::test_T12_clearSucceedsWhenFeeRouterFrozen` and `test_T12_clearSucceedsWhenTreasuryFrozen` (fee is pulled by `flush`, D-049; a paused USDG delays `clear` until unpause, `test_T12_clearWaitsForUsdgUnpause`), `test_T12_settleSucceedsWhenUsdgPaused`; invariant **I-9**; fork test `Fork_Usdg.t.sol::test_T12_measureUsdgFeedCadence` that prints round timestamps for the last 14 days (informational, gates the parameter choice).
 
 **Residual / recommendation.** Minimise USDG at rest: encourage prompt `claimPremium` (frontend), forward fees per clearing (already), and keep the pull pattern (RS-06) so a freeze never blocks state transitions. Bonds are the largest USDG balance at rest (25 000 per MM); accepted.
 
@@ -445,8 +445,8 @@ Format per threat: what is at risk, the scenario, severity and likelihood with t
 **Mitigations in SPEC.** Bounds on distance and reserve; `S_ref` read on-chain; hints verified; every keeper duty is also permissionless so liveness does not depend on the keeper; guardian scope limited; caps.
 
 **Enforced by.**
-- `CoveredCallVault.openAuction` (`onlyRole(KEEPER_ROLE)`, bounds), `AuctionHouse` reserve bounds, `RiskModule`.
-- Tests: `Vault.t.sol::test_T13_openAuctionRequiresKeeperRole`, `test_T13_distanceBelowBoundReverts`, `test_T13_reserveBelowCuratorFloorReverts`, `test_T13_reserveAboveSpotReverts`, `test_T13_anyoneCanSettleHaltProcessQueues`.
+- `AuctionHouse.openAuction` (`onlyRole(KEEPER_ROLE)`, distance and reserve bounds, §5 schedule), `RiskModule`.
+- Tests (`contracts/test/AuctionHouse.threats.t.sol`): `test_T13_openAuctionRequiresKeeperRole`, `test_T13_noRoleAdminExists`, `test_T13_distanceBelowBoundReverts`, `test_T13_reserveBelowCuratorFloorReverts`, `test_T13_reserveAboveSpotReverts`, `test_T13_weekendCannotOpenOutsideFridayWindow`; `test_T13_anyoneCanSettleHaltProcessQueues` awaits SettlementOracle.
 
 **Residual / recommendation.**
 - **RS-11** Curator-set per-vault floors: `minStrikeDistanceBps[kind]` (within protocol bounds) and `minReserveBpsOfSpot > 0` by default (e.g. 20 bps of spot for weekday single names). This turns scenario 1 from "near-zero premium at 3 % OTM" into "at least the curator's floor", and a curator is bonded.

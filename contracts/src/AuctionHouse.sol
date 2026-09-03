@@ -27,9 +27,10 @@ import {SeriesKind, SeriesState} from "./Types.sol";
 /// refunds (D-023) and option allocations (D-024) for pull. `clear` makes no outbound transfer to a bidder
 /// and mints no ERC-1155, so no third party can block it. Premium net of the performance fee is pulled by
 /// the vault (`mintSeries`); the fee is booked in `FeeRouter`.
-/// @dev Deployment order: BondManager and FeeRouter first, then this contract (their `auctionHouse` is set
-/// once, D-044), then the vaults, whose `auctionHouse` is immutable. `priceSource` is settable until
-/// SettlementOracle ships (D-039, D-047): `sRef == S_cap` until then.
+/// @dev Deployment order: OptionToken, BondManager and FeeRouter first, then this contract (their
+/// `auctionHouse` is set once, D-044), then the vaults, whose `auctionHouse` and `optionToken` are immutable
+/// and asserted by `registerVault` (D-049). `priceSource` is settable until SettlementOracle ships (D-039,
+/// D-047): `sRef == S_cap` until then.
 contract AuctionHouse is IAuctionHouse, Ownable2Step, AccessControl, ReentrancyGuard, ERC1155Holder {
     using SafeERC20 for IERC20;
     using SafeCast for uint256;
@@ -42,7 +43,8 @@ contract AuctionHouse is IAuctionHouse, Ownable2Step, AccessControl, ReentrancyG
     /// @dev SPEC §5: 900 s. The 64-bid gas bound (§8.2) is measured against these two constants.
     uint64 public constant AUCTION_DURATION = 900;
     uint256 public constant MAX_BIDS = 64;
-    uint64 public constant MAX_OPEN_TOLERANCE = 4 hours; // keeps both open windows inside one epoch week
+    uint64 public constant MAX_OPEN_TOLERANCE = 4 hours; // keeps the Monday window inside one epoch week
+    uint64 public constant MAX_WEEKEND_LATE = 2 hours; // weekend window never reaches Saturday (SPEC §5 (d))
     /// @dev Epoch-week offsets, seconds since Thursday 00:00 UTC (SPEC §5, D-046).
     uint64 public constant WEEK = 604_800;
     uint64 public constant MON_1400 = 396_000;
@@ -71,6 +73,9 @@ contract AuctionHouse is IAuctionHouse, Ownable2Step, AccessControl, ReentrancyG
     IERC20 public immutable usdg;
     IBondManager public immutable bondManager;
     IFeeRouter public immutable feeRouter;
+    /// @dev One OptionToken per AuctionHouse: series ids are allocated by its counter, so two OptionTokens
+    /// would produce colliding `seriesId`s and overwrite each other's auctions (D-049).
+    IOptionToken public immutable optionToken;
 
     // ───────────────────────────── parameters (timelock) ─────────────────────────────
 
@@ -82,7 +87,6 @@ contract AuctionHouse is IAuctionHouse, Ownable2Step, AccessControl, ReentrancyG
     // ───────────────────────────── per-vault config ─────────────────────────────
 
     mapping(address vault => bool) public isVault;
-    mapping(address vault => IOptionToken) public optionTokenOf;
     mapping(address vault => mapping(SeriesKind kind => uint16)) public minStrikeDistanceBps;
     mapping(address vault => mapping(SeriesKind kind => uint16)) public minReserveBpsOfSpot;
     mapping(address vault => uint64) public lastWeekdayExpiry;
@@ -125,6 +129,9 @@ contract AuctionHouse is IAuctionHouse, Ownable2Step, AccessControl, ReentrancyG
     error SeriesNotSettled(SeriesState state);
     error UnexpectedTokens();
     error OutOfBounds();
+    error Miswired(bytes32 what);
+    error WrongOptionToken(address vault, address optionToken);
+    error SeriesIdInUse(uint256 seriesId);
 
     // ───────────────────────────── events (SPEC §16.1) ─────────────────────────────
 
@@ -162,17 +169,30 @@ contract AuctionHouse is IAuctionHouse, Ownable2Step, AccessControl, ReentrancyG
 
     // ───────────────────────────── constructor ─────────────────────────────
 
-    constructor(address usdg_, address bondManager_, address feeRouter_, address priceSource_, address owner_)
-        Ownable(owner_)
-    {
-        if (usdg_ == address(0) || bondManager_ == address(0) || feeRouter_ == address(0) || priceSource_ == address(0))
-        {
-            revert ZeroAddress();
-        }
+    /// @dev Wiring is asserted here and in `registerVault` (D-049): a mismatched USDG, BondManager or FeeRouter
+    /// would otherwise surface only at the first bid or the first clear, after vaults with an immutable
+    /// `auctionHouse` are deployed. The FeeRouter pulls booked fees from this contract (`flush`), hence the
+    /// standing approval.
+    constructor(
+        address usdg_,
+        address bondManager_,
+        address feeRouter_,
+        address priceSource_,
+        address optionToken_,
+        address owner_
+    ) Ownable(owner_) {
+        if (
+            usdg_ == address(0) || bondManager_ == address(0) || feeRouter_ == address(0) || priceSource_ == address(0)
+                || optionToken_ == address(0)
+        ) revert ZeroAddress();
+        if (address(IBondManager(bondManager_).usdg()) != usdg_) revert Miswired("BOND_MANAGER_USDG");
+        if (address(IFeeRouter(feeRouter_).usdg()) != usdg_) revert Miswired("FEE_ROUTER_USDG");
         usdg = IERC20(usdg_);
         bondManager = IBondManager(bondManager_);
         feeRouter = IFeeRouter(feeRouter_);
         priceSource = IPriceSource(priceSource_);
+        optionToken = IOptionToken(optionToken_);
+        IERC20(usdg_).forceApprove(feeRouter_, type(uint256).max);
     }
 
     // ═════════════════════════════ keeper: open (SPEC §5, §7.2, §8.3, D-028) ═════════════════════════════
@@ -212,7 +232,8 @@ contract AuctionHouse is IAuctionHouse, Ownable2Step, AccessControl, ReentrancyG
         }
     }
 
-    /// @dev Stores the auction fields (SPEC §6 split) and emits `AuctionOpened`.
+    /// @dev Stores the auction fields (SPEC §6 split) and emits `AuctionOpened`. The fee rate is snapshotted at
+    /// open so a timelocked change never lands on bids placed under the old rate (D-031 principle, D-049).
     function _record(
         uint256 seriesId,
         address vault,
@@ -224,7 +245,9 @@ contract AuctionHouse is IAuctionHouse, Ownable2Step, AccessControl, ReentrancyG
         uint128 reservePrice
     ) internal {
         Auction storage a = _auctions[seriesId];
+        if (a.state != AuctionState.NONE) revert SeriesIdInUse(seriesId);
         a.vault = vault;
+        a.feeBps = feeRouter.feeBps(vault);
         a.kind = kind;
         a.state = AuctionState.OPEN;
         a.auctionOpen = uint64(block.timestamp);
@@ -340,13 +363,14 @@ contract AuctionHouse is IAuctionHouse, Ownable2Step, AccessControl, ReentrancyG
         emit BidFilled(seriesId, b.bidder, bidId, fill, refund);
     }
 
-    /// @dev State transition and interactions of `clear`: fee to the router (bookkeeping only), premium pulled by
+    /// @dev State transition and interactions of `clear`: fee booked in the router (the USDG stays here until
+    /// `FeeRouter.flush` pulls it, so no fee-side transfer can revert `clear`, D-023/D-049), premium pulled by
     /// the vault in `mintSeries`, bonds of bidders without a fill released.
     function _finalize(uint256 seriesId, Auction storage a, uint256 cp, uint256 filled, uint256 gross)
         internal
         returns (uint256 fee)
     {
-        fee = Math.mulDiv(gross, feeRouter.feeBps(a.vault), BPS);
+        fee = Math.mulDiv(gross, a.feeBps, BPS);
         uint256 net = gross - fee;
         a.state = AuctionState.CLEARED;
         a.clearingPrice = cp.toUint128();
@@ -355,10 +379,7 @@ contract AuctionHouse is IAuctionHouse, Ownable2Step, AccessControl, ReentrancyG
         a.fee = fee.toUint128();
         emit AuctionCleared(seriesId, cp, filled, gross, fee);
 
-        if (fee > 0) {
-            usdg.safeTransfer(address(feeRouter), fee);
-            feeRouter.collect(a.vault, seriesId, fee);
-        }
+        if (fee > 0) feeRouter.collect(a.vault, seriesId, fee);
         if (net > 0) usdg.forceApprove(a.vault, net);
         ICoveredCallVault(a.vault).mintSeries(seriesId, filled, net);
         address[] storage bidders_ = _bidders[seriesId];
@@ -551,7 +572,7 @@ contract AuctionHouse is IAuctionHouse, Ownable2Step, AccessControl, ReentrancyG
 
     /// @inheritdoc IAuctionHouse
     function withdrawRefund(address to) external nonReentrant returns (uint256 amount) {
-        if (to == address(0)) revert ZeroAddress();
+        if (to == address(0) || to == address(this)) revert InvalidRecipient();
         amount = refundable[msg.sender];
         if (amount == 0) revert NothingToClaim();
         refundable[msg.sender] = 0;
@@ -575,15 +596,14 @@ contract AuctionHouse is IAuctionHouse, Ownable2Step, AccessControl, ReentrancyG
     /// @dev SPEC §8.2 step 6 / D-038: an unclaimed allocation is still an option. Mints to this contract and
     /// claims the settlement payout for `to` in one transaction. Reverts until the series is settled.
     function claimPayout(uint256 seriesId, address to) external nonReentrant returns (uint256 qty, uint256 tokens) {
-        if (to == address(0)) revert ZeroAddress();
+        if (to == address(0) || to == address(this)) revert InvalidRecipient();
         qty = claimableOptions[seriesId][msg.sender];
         if (qty == 0) revert NothingToClaim();
         claimableOptions[seriesId][msg.sender] = 0;
-        address vault = _auctions[seriesId].vault;
         _expectingMint = true;
-        ICoveredCallVault(vault).mintOptions(seriesId, address(this), qty);
+        ICoveredCallVault(_auctions[seriesId].vault).mintOptions(seriesId, address(this), qty);
         _expectingMint = false;
-        tokens = optionTokenOf[vault].claim(seriesId, qty, to);
+        tokens = optionToken.claim(seriesId, qty, to);
         emit PayoutClaimed(seriesId, msg.sender, to, qty, tokens);
     }
 
@@ -611,7 +631,10 @@ contract AuctionHouse is IAuctionHouse, Ownable2Step, AccessControl, ReentrancyG
         override
         returns (bytes4)
     {
-        if (!_expectingMint || from != address(0) || msg.sender != address(optionTokenOf[_auctions[id].vault])) {
+        if (
+            !_expectingMint || from != address(0) || msg.sender != address(optionToken)
+                || _auctions[id].state != AuctionState.CLEARED
+        ) {
             revert UnexpectedTokens();
         }
         return this.onERC1155Received.selector;
@@ -628,16 +651,19 @@ contract AuctionHouse is IAuctionHouse, Ownable2Step, AccessControl, ReentrancyG
 
     // ═════════════════════════════ admin (timelock) ═════════════════════════════
 
-    /// @notice Register a vault whose immutable `auctionHouse` is this contract; sets the curator floors to the
-    /// protocol defaults (D-027) and initialises its fee in the router.
+    /// @notice Register a vault whose immutable `auctionHouse` is this contract and whose `optionToken` and
+    /// `usdg` match this contract's; sets the curator floors to the protocol defaults (D-027) and initialises
+    /// its fee in the router. Also asserts the set-once wiring of BondManager and FeeRouter (D-044, D-049).
     function registerVault(address vault) external onlyOwner {
         if (vault == address(0)) revert ZeroAddress();
         if (isVault[vault]) revert AlreadyRegistered(vault);
         if (ICoveredCallVault(vault).auctionHouse() != address(this)) revert VaultNotWired(vault);
-        IOptionToken optionToken = ICoveredCallVault(vault).optionToken();
-        if (address(optionToken) == address(0)) revert ZeroAddress();
+        address vaultOptionToken = address(ICoveredCallVault(vault).optionToken());
+        if (vaultOptionToken != address(optionToken)) revert WrongOptionToken(vault, vaultOptionToken);
+        if (address(ICoveredCallVault(vault).usdg()) != address(usdg)) revert Miswired("VAULT_USDG");
+        if (bondManager.auctionHouse() != address(this)) revert Miswired("BOND_MANAGER");
+        if (feeRouter.auctionHouse() != address(this)) revert Miswired("FEE_ROUTER");
         isVault[vault] = true;
-        optionTokenOf[vault] = optionToken;
         minStrikeDistanceBps[vault][SeriesKind.WEEKDAY] = STRIKE_LO_WEEKDAY;
         minStrikeDistanceBps[vault][SeriesKind.WEEKEND] = STRIKE_LO_WEEKEND;
         minReserveBpsOfSpot[vault][SeriesKind.WEEKDAY] = DEFAULT_RESERVE_WEEKDAY;
@@ -718,9 +744,8 @@ contract AuctionHouse is IAuctionHouse, Ownable2Step, AccessControl, ReentrancyG
             uint64 fri = ws + WEEK;
             if (expiry < fri + FRI_1930 || expiry > fri + FRI_2130) return (false, "EXPIRY");
         } else {
-            if (off < FRI_1930 + WEEKEND_GAP || off > FRI_2130 + WEEKEND_GAP + openTolerance) {
-                return (false, "OPEN_WINDOW");
-            }
+            uint64 late = openTolerance < MAX_WEEKEND_LATE ? openTolerance : MAX_WEEKEND_LATE;
+            if (off < FRI_1930 + WEEKEND_GAP || off > FRI_2130 + WEEKEND_GAP + late) return (false, "OPEN_WINDOW");
             if (expiry != ws + SUN_2359) return (false, "EXPIRY");
             uint64 last = lastWeekdayExpiry[vault];
             if (last >= ws && at < last + WEEKEND_GAP) return (false, "WEEKDAY_GAP");

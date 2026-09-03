@@ -9,8 +9,10 @@ import {MockUSDG} from "../src/mocks/MockUSDG.sol";
 import {IAuctionHouse} from "../src/interfaces/IAuctionHouse.sol";
 import {IBondManager} from "../src/interfaces/IBondManager.sol";
 import {SeriesKind, SeriesState, VaultState} from "../src/Types.sol";
-import {IERC1155Receiver} from "@openzeppelin/contracts/token/ERC1155/IERC1155Receiver.sol";
-import {IERC1155Errors} from "@openzeppelin/contracts/interfaces/draft-IERC6093.sol";
+import {ReentrantActor} from "./mocks/ReentrantActor.sol";
+import {IERC1155Errors, IERC20Errors} from "@openzeppelin/contracts/interfaces/draft-IERC6093.sol";
+import {IAccessControl} from "@openzeppelin/contracts/access/IAccessControl.sol";
+import {ReentrancyGuard} from "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
 
 /// @dev Bidder contract without the ERC-1155 receiver interface (THREAT-MODEL T-07.4).
 contract NonReceiverBidder {
@@ -41,55 +43,6 @@ contract NonReceiverBidder {
     }
 }
 
-/// @dev ERC-1155 receiver that tries to re-enter the AuctionHouse and the vault from the mint callback (T-16).
-contract ReentrantReceiver is IERC1155Receiver {
-    AuctionHouse internal ah;
-    CoveredCallVault internal vault;
-    uint256 internal id;
-    uint256 public successes;
-    uint256 public attempts;
-
-    constructor(AuctionHouse ah_, CoveredCallVault vault_, uint256 id_) {
-        ah = ah_;
-        vault = vault_;
-        id = id_;
-    }
-
-    function onERC1155Received(address, address, uint256, uint256, bytes calldata) external returns (bytes4) {
-        attempts = 0;
-        _try(abi.encodeCall(ah.bid, (id, 1e17, 1e6)));
-        _try(abi.encodeCall(ah.clear, (id)));
-        _try(abi.encodeCall(ah.withdrawRefund, (address(this))));
-        _try(abi.encodeCall(ah.claimOptions, (id, address(this))));
-        _try(abi.encodeCall(ah.claimPayout, (id, address(this))));
-        _try(abi.encodeCall(ah.releaseLocks, (id)));
-        _try(abi.encodeCall(vault.processRedeems, (1)));
-        _try(abi.encodeCall(vault.claimPremium, (address(this))));
-        return IERC1155Receiver.onERC1155Received.selector;
-    }
-
-    function _try(bytes memory data) internal {
-        attempts++;
-        address target = bytes4(data) == vault.processRedeems.selector || bytes4(data) == vault.claimPremium.selector
-            ? address(vault)
-            : address(ah);
-        (bool ok,) = target.call(data);
-        if (ok) successes++;
-    }
-
-    function onERC1155BatchReceived(address, address, uint256[] calldata, uint256[] calldata, bytes calldata)
-        external
-        pure
-        returns (bytes4)
-    {
-        return IERC1155Receiver.onERC1155BatchReceived.selector;
-    }
-
-    function supportsInterface(bytes4 iid) external pure returns (bool) {
-        return iid == type(IERC1155Receiver).interfaceId;
-    }
-}
-
 /// @notice Threat-model regression tests, named `test_Txx_…` per THREAT-MODEL §6 (T-04, T-05, T-07, T-09, T-12,
 /// T-13, T-16).
 contract AuctionHouseThreatsTest is AuctionBaseTest {
@@ -108,7 +61,7 @@ contract AuctionHouseThreatsTest is AuctionBaseTest {
         usdg.transfer(bob, left);
         uint256 id = _openDefault();
         vm.prank(poor);
-        vm.expectRevert();
+        vm.expectRevert(abi.encodeWithSelector(IERC20Errors.ERC20InsufficientBalance.selector, poor, 0, 2e6));
         ah.bid(id, 1e18, 2e6);
         assertEq(ah.bids(id).length, 0);
         assertEq(ah.bidCount(id, poor), 0);
@@ -243,6 +196,22 @@ contract AuctionHouseThreatsTest is AuctionBaseTest {
 
     // ───────────────────────────── T-12 external token failures ─────────────────────────────
 
+    /// T-12 / D-049: the fee never leaves the AuctionHouse inside `clear`, so a frozen FeeRouter (or a frozen
+    /// treasury) cannot revert it; only `flush` is affected, and a frozen router is not even that.
+    function test_T12_clearSucceedsWhenFeeRouterFrozen() public {
+        usdg.setFrozen(address(fr), true);
+        uint256 id = _openDefault();
+        _bid(mm1, id, 50e18, 2e6);
+        (,,, uint256 fee) = _clear(id);
+        assertEq(fee, 10e6);
+        assertEq(fr.pending(address(vault)), 10e6);
+        assertEq(usdg.balanceOf(address(ah)), 10e6, "fee parked in the AuctionHouse");
+        assertEq(usdg.balanceOf(address(fr)), 0);
+        fr.flush(address(vault)); // AuctionHouse → treasury, the router never holds USDG
+        assertEq(usdg.balanceOf(treasury), 10e6);
+        assertEq(usdg.balanceOf(address(ah)), 0);
+    }
+
     /// A frozen treasury breaks `flush` only; `clear` books the fee and moves on (D-023).
     function test_T12_clearSucceedsWhenTreasuryFrozen() public {
         usdg.setFrozen(treasury, true);
@@ -277,11 +246,41 @@ contract AuctionHouseThreatsTest is AuctionBaseTest {
 
     function test_T13_openAuctionRequiresKeeperRole() public {
         uint64 exp = _fridayExpiry();
+        bytes32 role = ah.KEEPER_ROLE();
         vm.prank(bob);
-        vm.expectRevert();
+        vm.expectRevert(abi.encodeWithSelector(IAccessControl.AccessControlUnauthorizedAccount.selector, bob, role));
         ah.openAuction(address(vault), SeriesKind.WEEKDAY, exp, DIST, RESERVE);
         vm.prank(keeper);
         ah.openAuction(address(vault), SeriesKind.WEEKDAY, exp, DIST, RESERVE);
+    }
+
+    /// Nobody holds `DEFAULT_ADMIN_ROLE`: the raw AccessControl grant/revoke entry points are dead for everyone,
+    /// including the owner and the keeper; only the timelocked `setKeeper` changes the role (D-028, D-049).
+    function test_T13_noRoleAdminExists() public {
+        bytes32 role = ah.KEEPER_ROLE();
+        bytes32 adminRole = ah.DEFAULT_ADMIN_ROLE();
+        address[3] memory callers = [admin, keeper, bob];
+        for (uint256 i; i < callers.length; ++i) {
+            address c = callers[i];
+            vm.prank(c);
+            vm.expectRevert(
+                abi.encodeWithSelector(IAccessControl.AccessControlUnauthorizedAccount.selector, c, adminRole)
+            );
+            ah.grantRole(role, bob);
+            vm.prank(c);
+            vm.expectRevert(
+                abi.encodeWithSelector(IAccessControl.AccessControlUnauthorizedAccount.selector, c, adminRole)
+            );
+            ah.revokeRole(role, keeper);
+            vm.prank(c);
+            vm.expectRevert(
+                abi.encodeWithSelector(IAccessControl.AccessControlUnauthorizedAccount.selector, c, adminRole)
+            );
+            ah.grantRole(adminRole, c);
+        }
+        assertEq(ah.getRoleAdmin(role), adminRole);
+        assertFalse(ah.hasRole(adminRole, admin));
+        assertTrue(ah.hasRole(role, keeper));
     }
 
     function test_T13_distanceBelowBoundReverts() public {
@@ -365,19 +364,41 @@ contract AuctionHouseThreatsTest is AuctionBaseTest {
 
     // ───────────────────────────── T-16 reentrancy ─────────────────────────────
 
-    /// Every mutating entry point of the AuctionHouse and the vault is closed from the ERC-1155 mint callback.
+    /// The re-entering actor holds a refund, an allocation and premium-bearing shares, so each attempt from the
+    /// ERC-1155 mint callback would succeed if the guards were missing; every one must revert with the
+    /// ReentrancyGuard error, and the same calls succeed right after the callback (non-vacuity check).
     function test_T16_erc1155CallbackCannotReenterVaultOrAuction() public {
+        ReentrantActor r = new ReentrantActor(ah, vault, bm, usdg, stock);
+        usdg.mint(address(r), 1_000_000e6);
+        vm.prank(admin);
+        stock.mint(address(r), 20e18);
+        r.post();
+        r.deposit(20e18); // offered = 120, so both bids fill fully at cp = 2e6
         uint256 id = _openDefault();
-        _bid(mm1, id, 50e18, 2e6);
-        _bid(mm2, id, 50e18, 1.5e6);
+        r.bid(id, 50e18, 3e6); // escrow 150, pays 100 → refund 50
+        _bid(mm1, id, 60e18, 2e6);
         _clear(id);
-        ReentrantReceiver r = new ReentrantReceiver(ah, vault, id);
+        assertEq(ah.refundable(address(r)), 50e6);
+        assertEq(ah.claimableOptions(id, address(r)), 50e18);
+        assertGt(vault.premiumClaimable(address(r)), 0);
+
         vm.prank(mm1);
-        ah.claimOptions(id, address(r));
-        assertEq(r.attempts(), 8, "callback ran");
+        ah.claimOptions(id, address(r)); // mint callback lands on the actor while both guards are held
+        assertEq(r.attempts(), 3, "callback ran");
         assertEq(r.successes(), 0, "no re-entry succeeded");
-        assertEq(opt.balanceOf(address(r), id), 50e18);
-        assertEq(ah.refundable(mm1), 25e6, "state untouched: 100 escrowed, paid 50 x 1.5");
-        assertEq(ah.refundable(mm2), 0);
+        for (uint256 i; i < r.selectorCount(); ++i) {
+            assertEq(r.selectors(i), ReentrancyGuard.ReentrancyGuardReentrantCall.selector, "guard, not a precondition");
+        }
+        assertEq(opt.balanceOf(address(r), id), 60e18, "mm1's tokens delivered");
+        assertEq(ah.refundable(address(r)), 50e6, "state untouched");
+        assertEq(ah.claimableOptions(id, address(r)), 50e18);
+
+        // the very same calls succeed outside the callback
+        r.exec(address(ah), abi.encodeCall(ah.withdrawRefund, (address(r))));
+        r.exec(address(ah), abi.encodeCall(ah.claimOptions, (id, address(r))));
+        r.exec(address(vault), abi.encodeCall(vault.claimPremium, (address(r))));
+        assertEq(ah.refundable(address(r)), 0);
+        assertEq(opt.balanceOf(address(r), id), 110e18);
+        assertEq(vault.premiumClaimable(address(r)), 0);
     }
 }

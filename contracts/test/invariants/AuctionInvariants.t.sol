@@ -3,6 +3,7 @@ pragma solidity 0.8.26;
 
 import {AuctionBaseTest} from "../AuctionBase.t.sol";
 import {AuctionHandler} from "./AuctionHandler.sol";
+import {ReentrantActor} from "../mocks/ReentrantActor.sol";
 import {IAuctionHouse} from "../../src/interfaces/IAuctionHouse.sol";
 import {ICoveredCallVault} from "../../src/interfaces/ICoveredCallVault.sol";
 import {SeriesState, VaultState} from "../../src/Types.sol";
@@ -12,13 +13,19 @@ import {SeriesState, VaultState} from "../../src/Types.sol";
 contract AuctionInvariants is AuctionBaseTest {
     AuctionHandler internal h;
 
+    ReentrantActor internal reenterer;
+
     function setUp() public override {
         super.setUp();
-        address[] memory mms = new address[](4);
+        reenterer = new ReentrantActor(ah, vault, bm, usdg, stock);
+        usdg.mint(address(reenterer), MM_USDG);
+        reenterer.post();
+        address[] memory mms = new address[](5);
         mms[0] = mm1;
         mms[1] = mm2;
         mms[2] = mm3;
         mms[3] = mm4;
+        mms[4] = address(reenterer); // malicious ERC-1155 receiver among the bidders (THREAT-MODEL §6, T-16)
         address[] memory deps = new address[](2);
         deps[0] = alice;
         deps[1] = bob;
@@ -53,18 +60,47 @@ contract AuctionInvariants is AuctionBaseTest {
         emit log_named_uint("refunds withdrawn", h.refundsWithdrawn());
     }
 
-    /// SPEC I-3 (exact): the AuctionHouse holds exactly the open escrow plus every refund not yet withdrawn.
+    /// @dev Deterministic proof that the handler's actions are not vacuous: a few composite cycles must reach
+    /// open, bid, clear, settle and a payout claim.
+    function test_handlerReachesEveryState() public {
+        for (uint256 i = 1; i <= 4; ++i) {
+            h.fullCycle(uint256(keccak256(abi.encode(i))));
+            for (uint256 j; j < 5; ++j) {
+                h.claimPayout(j, i);
+            }
+        }
+        assertGe(h.opens(), 3, "opens");
+        assertGe(h.bidsPlaced(), 3, "bids");
+        assertGe(h.clears() + h.skips(), 3, "clears or skips");
+        assertGe(h.clears(), 1, "at least one real clear");
+        assertGe(h.settles(), 1, "settles");
+        assertGe(h.payoutsClaimed(), 1, "payouts");
+        assertEq(h.previewMismatches(), 0);
+    }
+
+    /// SPEC I-3 (exact): the AuctionHouse holds exactly the open escrow, every refund not yet withdrawn and the
+    /// fees booked but not yet flushed (D-049).
+    /// forge-config: default.invariant.depth = 64
     function invariant_I3_escrowExact() public view {
         uint256 refundable;
         for (uint256 i; i < h.mmCount(); ++i) {
             refundable += ah.refundable(h.mms(i));
         }
         assertEq(
-            usdg.balanceOf(address(ah)), h.escrowOpenTotal() + refundable, "I-3: balance == open escrow + refundable"
+            usdg.balanceOf(address(ah)),
+            h.escrowOpenTotal() + refundable + fr.pending(address(vault)),
+            "I-3: balance == open escrow + refundable + pending fees"
         );
     }
 
+    /// T-16: the malicious receiver among the bidders never re-enters successfully.
+    /// forge-config: default.invariant.depth = 64
+    function invariant_T16_noReentrancy() public view {
+        assertEq(reenterer.successes(), 0, "T-16");
+    }
+
     /// SPEC I-3 / D-043: for every closed auction, Σ escrow == Σ refunds credited + premiumNet + fee, to the unit.
+    /// forge-config: default.invariant.depth = 64
     function invariant_I3_closedConservation() public view {
         assertEq(
             h.escrowClosed(), h.refundsCredited() + h.premiumNetTotal() + h.feeTotal(), "I-3: closed escrow conserved"
@@ -72,6 +108,7 @@ contract AuctionInvariants is AuctionBaseTest {
     }
 
     /// SPEC I-3 allocation identity: claimable + outstanding tokens + claimed == filledQty, and the vault agrees.
+    /// forge-config: default.invariant.depth = 64
     function invariant_I3_allocationIdentity() public view {
         for (uint256 i; i < h.seriesCount(); ++i) {
             uint256 id = h.seriesIds(i);
@@ -87,7 +124,8 @@ contract AuctionInvariants is AuctionBaseTest {
             if (a.state == IAuctionHouse.AuctionState.CLEARED) {
                 assertGe(a.clearingPrice, a.reservePrice, "cleared at or above reserve");
                 assertGt(a.filledQty, 0, "a cleared auction filled something");
-                assertEq(a.premiumGross, a.fee + (a.premiumGross - a.fee));
+                assertLe(a.fee, a.premiumGross / 5, "fee never above the 20 % protocol bound");
+                assertEq(a.fee, a.premiumGross * a.feeBps / 1e4, "fee at the snapshotted rate");
             } else if (a.state == IAuctionHouse.AuctionState.SKIPPED) {
                 assertEq(a.filledQty, 0);
                 assertEq(uint256(s.state), uint256(SeriesState.SKIPPED));
@@ -95,13 +133,15 @@ contract AuctionInvariants is AuctionBaseTest {
         }
     }
 
-    /// Fees only ever sit in the router or the treasury.
+    /// Fees only ever sit in the AuctionHouse (booked in the router) or the treasury; the router holds nothing.
+    /// forge-config: default.invariant.depth = 64
     function invariant_feeConservation() public view {
         assertEq(fr.pending(address(vault)) + usdg.balanceOf(treasury), h.feeTotal(), "fee conservation");
-        assertEq(usdg.balanceOf(address(fr)), fr.pending(address(vault)), "router balance == pending");
+        assertEq(usdg.balanceOf(address(fr)), 0, "router never holds USDG");
     }
 
     /// SPEC I-13: a filled bidder of the LIVE / HALTED series is locked and cannot withdraw its bond.
+    /// forge-config: default.invariant.depth = 64
     function invariant_I13_bondLocks() public view {
         assertEq(h.withdrawWhileLocked(), 0, "I-13: no withdrawal while locked");
         VaultState st = vault.state();
@@ -117,11 +157,13 @@ contract AuctionInvariants is AuctionBaseTest {
     }
 
     /// `previewClear` never disagrees with `clear`.
+    /// forge-config: default.invariant.depth = 64
     function invariant_previewMatchesClear() public view {
         assertEq(h.previewMismatches(), 0, "preview == clear");
     }
 
     /// The vault never stays in AUCTION once the window closed and someone called `clear` (skip paths work).
+    /// forge-config: default.invariant.depth = 64
     function invariant_openAuctionMatchesVaultState() public view {
         uint256 id = ah.currentAuction(address(vault));
         if (id == 0) return;

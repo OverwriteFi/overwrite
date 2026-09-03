@@ -586,4 +586,28 @@ Format: ID · date · decision · alternatives considered · why · sources. New
 
 **Consequences.** SPEC §8.2 step 4; `testFuzz_T07_proRataMarginalFillConservesQty` (dust receivers form a prefix in bidId order), `test_clear_tieDustToEarliestBid`.
 
+---
+
+## D-049 · 2026-09-03 · Independent review of the auction layer: one OptionToken per AuctionHouse, fee pull, wiring asserts
+
+**Decision.** A fresh-context review of commits `5684416`/`298cbb6` (1 High, 3 Medium, 6 Low) led to:
+1. **One `OptionToken` per AuctionHouse (High).** `_auctions` is keyed by `seriesId`, which is allocated by the OptionToken counter. A vault on a second OptionToken would reuse id 1 and overwrite another vault's live auction (escrow mixed, the first vault stuck in AUCTION forever; reproduced by the reviewer). `optionToken` is now an immutable of the AuctionHouse, `registerVault` reverts `WrongOptionToken` on any other, and `_record` reverts `SeriesIdInUse` as a belt-and-braces check.
+2. **Fee is pulled, not pushed (Medium).** `clear` no longer transfers the fee to the FeeRouter; it books it with `collect` while the USDG stays in the AuctionHouse (standing approval granted in the constructor), and `FeeRouter.flush` pulls it with `safeTransferFrom(auctionHouse, treasury, amount)`. A Paxos-frozen FeeRouter can therefore not revert `clear` (the v0.4 text promised this, the code did not deliver it). I-3 becomes `balanceOf(AuctionHouse) == Σ open escrow + Σ refundable + Σ FeeRouter.pending`.
+3. **Wiring asserted early (Low).** The constructor checks `bondManager.usdg()` and `feeRouter.usdg()`; `registerVault` checks `vault.usdg()`, `bondManager.auctionHouse() == this` and `feeRouter.auctionHouse() == this`. A set-once mistake (D-044) is caught at registration instead of at the first bid, when the vaults' immutable `auctionHouse` can no longer be changed.
+4. **`feeBps` snapshotted at open** into `Auction.feeBps` (D-031 principle): a timelocked fee change applies from the next auction, never to bids already placed.
+5. `withdrawRefund(to)` and `claimPayout(to)` reject `to == address(this)` like `claimOptions` (stranding funds inside the AuctionHouse would break the exact I-3).
+6. `BondManager.activeLocks` gates the MM bond only; a curator bond of the same account is withdrawable while its MM bond is locked. Per-series curator locks (SPEC §13) arrive with VaultFactory.
+7. Weekend open window capped at `Friday 21:40 + min(openTolerance, 2 h)` (`MAX_WEEKEND_LATE`), so it never reaches Saturday whatever the tolerance.
+8. Tests: `test_T16_erc1155CallbackCannotReenterVaultOrAuction` was vacuous (every attempt failed a precondition); it now uses `ReentrantActor`, which holds a refund, an allocation and premium-bearing shares, asserts `ReentrancyGuardReentrantCall` on each attempt and proves the same calls succeed outside the callback. The same actor bids in the invariant handler (`invariant_T16_noReentrancy`). Added `test_T12_clearSucceedsWhenFeeRouterFrozen`, `test_T13_noRoleAdminExists`, `test_registerVault_rejectsForeignOptionToken`, `test_registerVault_rejectsMiswiring`, `test_twoVaultsOneOptionToken`, `test_clear_feeBpsSnapshottedAtOpen`, `test_haltedThenResolved_claimsAndLocks`, `test_bid_onSkippedAuctionReverts`, `test_locks_gateMMBondOnly`, `test_flush_pullsFromAuctionHouse`, `test_handlerReachesEveryState` (deterministic coverage of the invariant handler); auction invariants run at depth 64; the tautological fee assertion was replaced by the snapshotted-rate identity.
+
+**Accepted, recorded, not changed.**
+- A depositor holding every share can `requestRedeem(all)` during the 15-minute window and force the skip path after seeing the bids (a free look; MMs are refunded, nobody loses funds, the depositor forfeits its own premium). Fixing it means rejecting `requestRedeem` in AUCTION, which reverses D-036/D-040; left for the founder.
+- No account holds `DEFAULT_ADMIN_ROLE`; `grantRole`/`revokeRole` are dead for everyone and `setKeeper` (owner = timelock) is the only role mutation (D-028).
+- A pro-rata fill smaller than `1e18 / clearingPrice` wei pays 0 units; a few wei of options for free per auction, economically nil.
+- `renounceOwnership` is not overridden (same status as the vault layer; the timelock is the only owner).
+
+**Why.** CLAUDE.md rule 2 and 5; a second OptionToken is one deploy-script mistake away and the failure mode is a permanently frozen vault.
+
+**Consequences.** SPEC §3, §5 (d), §8.2 steps 6-7, §9.7 step 4, §11, §13, §16.1, §17 I-3; THREAT-MODEL T-09/T-12/T-13 test names; `AuctionHouse` constructor takes `optionToken`; deployment order unchanged.
+
 Scope recorded with D-043…D-048: BondManager implements MM and curator bonds in USDG with participation locks, cooldown and timelock slashing; per-series curator locks (VaultFactory phase), the WRITE migration (D-007) and the off-chain attestation stay out. FeeRouter implements the USDG mode; `setFeeMode(WRITE)`, `depositWrite`, `withdrawWrite` revert `WriteNotLaunched` while `writePool == address(0)` (D-016). Measured 2026-09-03: `clear` with 64 distinct bidders and a marginal pro-rata group costs **4.09 M gas**, the skip path with 64 bids **2.04 M** (`test_T07_clearGasUnder6M`, `test_T07_skipGasUnder6M`, bound 6 M).
