@@ -470,3 +470,46 @@ Format: ID · date · decision · alternatives considered · why · sources. New
 **Why.** Temporary exception to the "every cross-contract reference is immutable" rule of SPEC §3, confined to a contract that holds no funds and can only lower or raise deposit headroom. To be revisited: once `SettlementOracle` is deployed, either freeze the setter (one-way `freezePriceSource`) or redeploy before mainnet.
 
 **Consequences.** SPEC §12 note; OQ-003 in SPEC §18.
+
+---
+
+## D-040 · 2026-09-02 · The coverage re-check at clearing is against `totalAssets()`, not `freeAssets()` (review finding)
+
+**Decision.** `mintSeries` requires `filledQty ≤ offeredQty` and `filledQty ≤ totalAssets()`. Redeem requests filed during the 15-minute AUCTION window do not reduce what the AuctionHouse may fill.
+
+**Alternatives considered.** The v0.3 implementation checked `filledQty ≤ freeAssets()` (`totalAssets − encumbered − pendingRedeemAssets`). Rejected by the independent review: with D-009 (100 % of the balance offered) any `requestRedeem` of ≥ 1e6 shares (1e-12 token) during the window makes a full clear revert, so a griefer could kill every auction for gas and cancel afterwards.
+
+**Why.** The check is not needed for I-1: pending redeems stay inside `totalAssets` until they are processed, which happens only after `encumbered −= filledQty` at settlement, so encumbering the full offer never breaks coverage. The only legitimate reason for `totalAssets() < offeredQty` between open and clear is an issuer burn (SPEC §2), which the new check still catches (`InsufficientCoverage`). Consistent with D-036: an AUCTION-window request stays inside `offeredQty` and bears the series outcome.
+
+**Consequences.** SPEC §4.1; error renamed `InsufficientCoverage(qty, available)`; `test_T11_mintSeriesRevertsAfterIssuerBurnBetweenOpenAndClear`.
+
+---
+
+## D-041 · 2026-09-02 · Queue-processing hardening after the independent review (T-18, T-11, T-12, T-07.8)
+
+**Decision.**
+1. Every visited queue entry, including CANCELLED/EXECUTED/EXPIRED ones that are merely skipped, counts against the `n` bound in `_processDeposits` and `_processRedeems`.
+2. The cap read inside `_processDeposits` is wrapped in `try/catch`; a reverting `CapController`/`IPriceSource` stops deposit execution instead of reverting `settleSeries` or `openSeries`.
+3. When the remaining cap headroom is 0, processing stops; a request is EXPIRED only when headroom exists but the request is larger than it.
+4. `MAX_QUEUE_OPS = 100` (was 200), gas-measured: 100 redeems + 100 deposits inside one `settleSeries` cost **9.71 M gas** on 2026-09-02 (`test_T07_settleGasAtMaxQueueOps`, asserted < 20 M; Arbitrum per-tx limit 32 M). Defaults stay 50/50 (~5 M).
+5. `settleSeries` cross-checks the path against the series state: LIVE accepts paths 1–3, HALTED accepts 4–5.
+6. Shares can never be transferred, minted or deposited to the vault address except through `requestRedeem` escrow; `requestDeposit`/`requestRedeem` reject `receiver == vault`.
+7. `CapController.setSafetyModule(0)` reverts while `SAFETY_MODULE` mode is active.
+
+**Alternatives considered.** (1) Leaving skips uncounted (v0.3): the reviewer showed ~14 000 cancelled 1-wei entries (~$100–300 of gas on an Orbit chain) push `settleSeries` past the block gas limit and lock the vault in LIVE forever, re-opening T-18 in a worse form. (2) Removing queue processing from `settleSeries` entirely: rejected for now, keeps SPEC §4.3 UX; the try/catch and the bound make settlement independent of the queue contents and of the cap oracle. (3) Expiring every request when the cap is full (v0.3): lets anyone deposit-to-cap, process, withdraw, and mass-expire the queue; stopping instead matches the D-037 text.
+
+**Why.** Settlement liveness must depend on nothing a third party controls (T-11, T-12); queue bounds must be measured (T-07.8); state-machine holes are cheap to close; stranded shares in the vault would break I-16.
+
+**Consequences.** SPEC §4.3, §4.4, §9.6; new tests `test_T18_cancelledEntriesDoNotBlockSettle`, `test_T12_settleSurvivesRevertingPriceSource`, `test_T14_settlePathMustMatchState`, `test_T09_sharesCannotBeSentToVault`, `test_T07_settleGasAtMaxQueueOps`; handler actions `massCancel`, `setCap`, `issuerBurn`, `issuerPauseToggle`, `sunsetVault`, `setMaxQueueOps`, `transferShares`, reentrant receiver.
+
+---
+
+## D-042 · 2026-09-02 · D-026 check reads `effectiveAt` as "inside (now, expiry]"; ERC-8056 tokens keep a past `effectiveAt` (cast-verified)
+
+**Decision.** `canOpenAuction` refuses a series only when `token.effectiveAt() > block.timestamp && effectiveAt ≤ expiry`. A non-zero `effectiveAt` in the past does not block.
+
+**Alternatives considered.** v0.3 implemented `effectiveAt != 0 && effectiveAt ≤ expiry` (the wording of SPEC §5 (a) and §7.2). The reviewer flagged that a token which keeps the last effective timestamp after applying the multiplier would block the vault forever. `cast call` against AAPL (`0xaF3D…93f9`) on 2026-09-02 returned `effectiveAt() = 1786720366` (2026-08-14, in the past) with `uiMultiplier() == newUIMultiplier() == 1.000566080061092436`: the field is indeed retained. With the v0.3 check an AAPL vault could never have opened.
+
+**Why.** SPEC §10.3 already said "inside `(now, expiry]`"; §5 and §7.2 were the inconsistent lines and are corrected.
+
+**Consequences.** SPEC §1.2 (AAPL reads), §5 (a), §7.2; `test_T10_pastEffectiveAtDoesNotBlockOpen`. All three vault-layer contracts also moved to `Ownable2Step` so a mistyped `transferOwnership` cannot orphan `setSunset`/`registerVault` (reviewer finding, CLAUDE.md rule 5).
