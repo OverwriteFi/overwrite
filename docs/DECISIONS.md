@@ -611,3 +611,84 @@ Format: ID · date · decision · alternatives considered · why · sources. New
 **Consequences.** SPEC §3, §5 (d), §8.2 steps 6-7, §9.7 step 4, §11, §13, §16.1, §17 I-3; THREAT-MODEL T-09/T-12/T-13 test names; `AuctionHouse` constructor takes `optionToken`; deployment order unchanged.
 
 Scope recorded with D-043…D-048: BondManager implements MM and curator bonds in USDG with participation locks, cooldown and timelock slashing; per-series curator locks (VaultFactory phase), the WRITE migration (D-007) and the off-chain attestation stay out. FeeRouter implements the USDG mode; `setFeeMode(WRITE)`, `depositWrite`, `withdrawWrite` revert `WriteNotLaunched` while `writePool == address(0)` (D-016). Measured 2026-09-03: `clear` with 64 distinct bidders and a marginal pro-rata group costs **4.09 M gas**, the skip path with 64 bids **2.04 M** (`test_T07_clearGasUnder6M`, `test_T07_skipGasUnder6M`, bound 6 M).
+
+---
+
+## D-050 · 2026-09-03 · RiskModule: guardian role, `ALL` sentinel, halt hook, versioned oracle parameters
+
+**Decision.** `RiskModule` (`contracts/src/RiskModule.sol`) is `Ownable2Step` (owner = timelock) plus `AccessControl` with a single `GUARDIAN_ROLE` and no `DEFAULT_ADMIN_ROLE` holder (`setGuardian(account, bool)` by the owner, the `setKeeper` pattern of D-028). Guardian functions are `pauseDeposits`, `unpauseDeposits`, `pauseNewAuctions`, `unpauseNewAuctions`, each taking a vault or `ALL = address(0)`; they are idempotent, write exactly one flag and are callable by either guardian or the owner. `ALL` dominates the per-vault flag; unpausing `ALL` leaves per-vault flags in place. The oracle parameters of SPEC §6 (`OracleParams`, now in `Types.sol`) live in the RiskModule as append-only versions per vault; `paramsAt(vault, auctionOpen)` returns the version in effect when a series opened, `currentParams(vault)` the one a series opened in the next block would get. `setSettlementOracle` is set-once (D-044); the oracle calls `pauseNewAuctionsOnHalt(vault, seriesId, reason)` on every halt, which also writes a `lastHalt` record and `haltCount`.
+
+**Alternatives considered.** Parameters in SettlementOracle keyed by `auctionOpen` (D-047 wording): same snapshot semantics, but it mixes timelocked configuration with permissionless settlement logic in the largest contract (SettlementOracle is 22.5 KB). A global default version: rejected, every vault is configured explicitly and the protocol defaults apply until then.
+
+**Why.** Founder choice (2026-09-03): configuration and pauses in one small contract, settlement logic in another; invariant I-7 becomes a storage-diff check (`vm.record`) that a guardian call writes nothing but a pause flag.
+
+**Consequences.** SPEC §6, §15, §16; `IRiskModule` gains `paramsAt`, `currentParams`, `settlementOracle`, `pauseNewAuctionsOnHalt` (the vault-facing views are unchanged, the vault is not redeployed); `test/RiskModule.t.sol` (bounds, versioning, I-7, a real 48 h `TimelockController` proving I-12), `invariant_I7_guardianScope`.
+
+---
+
+## D-051 · 2026-09-03 · Jump guard accepts the plain check OR the multiplier-adjusted check
+
+**Decision.** `|S / sRef − 1| ≤ jumpBps` accepts; otherwise, if `uiMultiplier()` at settle time differs from `multiplierAtOpen`, `|S × multiplierAtOpen / m_now / sRef − 1| ≤ jumpBps` accepts.
+
+**Alternatives considered.** D-025 as written ("the guard *instead* accepts …"): under ERC-8056 a correctly sequenced 4-for-1 split leaves the raw-token price unchanged, so the adjusted ratio would be 0.25 and the guard would trip on the honest case. I-10 (SPEC §17) was already written as an OR.
+
+**Why.** The exception exists only to admit the feed/multiplier mis-sequencing of T-10.2; it must not reject the correctly sequenced case.
+
+**Consequences.** SPEC §9.1 wording; `testFuzz_jumpGuardBoundary`, `test_T10_split4xMidSeries_payoutUnchanged`, `test_T10_split4x_feedMovedByRatio_acceptedByException`, `test_T10_feedMoved4xWithoutMultiplierChange_tripsGuard`, `invariant_I10_jumpGuard`.
+
+---
+
+## D-052 · 2026-09-03 · Depth rule and price formula are orientation-specific; `√(1 + impactBps)` is computed
+
+**Decision.** For the D-010/D-018 depth rule the USDG amount that moves the stock price by `impactBps` is `L_avg × (√(1+i) − 1) × 2^96 / sqrtP` when USDG is token0 (buying token1 lowers `sqrtP`) and `L_avg × (√(1+i) − 1) × sqrtP / 2^96` when USDG is token1 (buying token0 raises `sqrtP`). `√(1+i) × 1e9` is `Math.sqrt((1e4 + impactBps) × 1e14)` (1 004 987 562 for 100 bps, the SPEC constant). The stock-is-token0 price formula of §9.5 is `price8 = 1e8 × 10^(dS − dU) × sqrtP² / 2^192` (the SPEC had the decimal factor inverted); the SPEC check value for tick 222 534 is 216.75, not 216.4.
+
+**Alternatives considered.** The SPEC's "same inequality for both orientations": wrong by a factor `sqrtP² / 2^192` (≈ 5 × 10⁹ at $200), which would have let a USDG-is-token1 pool (SPY, TSLA, AMZN, GOOGL by address order) pass the depth rule with almost no liquidity. Caught by `test_path2_reason_LIQUIDITY_thinWindow` during implementation.
+
+**Why.** Correctness; the rule is the main T-03 mitigation.
+
+**Consequences.** SPEC §9.3 item 1, §9.5; `OracleMath.depthOk`, `OracleMath.quotePrice8`; `testFuzz_depthRule_matchesSwapAmounts` (against the exact v3 swap amounts, both orientations), `testFuzz_quotePrice8_bothOrderings`, `testFuzz_quotePrice8_symmetry`.
+
+---
+
+## D-053 · 2026-09-03 · Settlement hints, exhaustion proofs, the 7-day halt backstop and next-second parameter versions
+
+**Decision.**
+1. `Hint {refRoundId, afterRoundId, afterPrevRoundId, obsIndex}`. `refRoundId` must be the last round with `answer > 0` at or before expiry; rounds with `answer ≤ 0` after it (at most 8) are skipped. `refRoundId == 0` is accepted only when the feed's first round `(1 << 64) | 1` is after expiry or the feed is unreachable; otherwise `RefRoundRequired`. A wrong round hint reverts (`BadRefRoundHint`, `BadAfterRoundHint`); a policy failure falls through to the next path.
+2. `obsIndex` (the newest pool observation at or before expiry) is advisory: an older index only under-counts the window, so a wrong index fails the TWAP path instead of reverting; the walk reads at most `minObservationsInWindow + 1` entries. The keeper computes it off-chain from `pool.observations`.
+3. `halt` needs an on-chain exhaustion proof (weekday: past `twapGrace` and no fresh round or a tripped guard; weekend: past Monday 15:00 UTC and no round after expiry, or the verified first-after round beyond the deadline or tripped) and is refused while `oraclePaused()` or the sequencer hook fails — except that from `expiry + haltedTimeout` (7 days) `halt` is allowed unconditionally, so a feed that stays paused can never lock a vault. Path 3 stays valid however late `settle` is called as long as the round itself is inside the deadline.
+4. A parameter version set in block `t` applies to series whose auction opens at `t + 1` or later (`effectiveFrom = block.timestamp + 1`). Found by `invariant_I12_paramSnapshot`: with `effectiveFrom = block.timestamp` a timelocked change executed in the same block as `openAuction` changed the parameters of the series that had just opened.
+5. `resolveRef` is fixed at `halt` (refRound answer, else `sRef`) and stored; both resolutions require the vault series to be HALTED.
+
+**Alternatives considered.** Reverting on a wrong observation index (first implementation): it made the default hint revert on every quiet window and gave the keeper nothing in return, since the index cannot be used to pass a check that the true state fails. Halting on `oraclePaused()` immediately: premature, the pause is meant to be short (§10.4).
+
+**Consequences.** SPEC §9.1, §9.3, §9.6, §6; `ISettlementOracle.Hint`; `test_settle_refHint_*`, `test_path2_observationHintCannotHelp`, `test_halt_*`, `test_halt_backstop_oraclePaused`, `test_paramsAt_versioning`, `invariant_I12_paramSnapshot`, `invariant_I14_liveness`.
+
+---
+
+## D-054 · 2026-09-03 · `capPrice` implements §12, `referencePrice` implements §7.2; the AuctionHouse keeps reading `capPrice`
+
+**Decision.** `SettlementOracle.capPrice(vault)` (IPriceSource) returns the Chainlink answer if younger than 80 h, else the 30-min TWAP anchored at now with all pool and USDG checks, and never reverts (`(0, false)` on a dead feed and pool). `referencePrice(vault) → (price8, source)` applies §7.2 (Chainlink ≤ 26 h and `oraclePaused() == false`, else the TWAP within 15 % of a Chainlink answer ≤ 80 h old, else `NoReferencePrice`). `AuctionHouse.setPriceSource(oracle)` and `CapController.setPriceSource(oracle)` are called at deployment (closes OQ-003 and the first half of OQ-004); the AuctionHouse still derives `S_ref` from `capPrice` (D-047), so the stricter §7.2 rule is not yet enforced at open — recorded as OQ-005.
+
+**Why.** The AuctionHouse is 1.5 KB from the size limit and is not redeployed in this phase.
+
+**Consequences.** SPEC §7.2, §12, §18; `test_capPrice_*`, `test_referencePrice_branches`.
+
+---
+
+## D-055 · 2026-09-03 · TickMath ported from Uniswap v4-core (MIT) without assembly
+
+**Decision.** `contracts/src/libraries/TickMath.sol` implements `getSqrtRatioAtTick` with the v4-core constants in plain Solidity (CLAUDE.md rule 8); `getTickAtSqrtRatio` is not needed. `OracleMath` holds the TWAP tick floor, harmonic liquidity, depth rule, price quote and bps helpers.
+
+**Alternatives considered.** Vendoring `v3-core` (`TickMath` is GPL-2.0, and the 0.8 branch still uses assembly) or `v3-periphery` `OracleLibrary`.
+
+**Consequences.** `test/OracleMath.t.sol`: the three canonical values (tick 0, MIN_TICK, MAX_TICK), monotonicity, the 1.0001 step, the SPEC §9.5 check.
+
+---
+
+## D-056 · 2026-09-03 · Protocol bounds for the parameters the SPEC left unstated
+
+**Decision.** `twapGrace ∈ [300, 3 600]`, `weekdayTwapBoundBps ∈ [100, 500]`, `swapNotionalUSDG ∈ [10 000e6, 10 000 000e6]`, `impactBps ∈ [10, 500]`, `sequencerGrace ∈ [600, 86 400]`, `usdgBandLowBps ∈ [9 000, 9 999]`, `usdgBandHighBps ∈ [10 001, 11 000]`, `usdgMaxStale ∈ [1 h, 80 h]` (T-12.5). The stated ones are unchanged: `weekdayMaxStale ∈ [1 h, 30 h]`, `weekendTwapBoundBps ∈ [300, 1 500]`, `minObservationsInWindow ∈ [1, 16]`, `jumpBps ∈ [1 000, 5 000]`. Bounds are constants of the RiskModule.
+
+**Why.** SPEC §15 says every parameter is bounded; a compromised timelock could otherwise set `twapGrace = 0` or a 100 % USDG band (T-14).
+
+**Consequences.** `RiskModule._validate`, `test_T14_parameterBoundsEnforced`.
