@@ -291,9 +291,27 @@ contract CoveredCallVaultTest is BaseTest {
         vault.requestDeposit(5e18, carol);
         vm.prank(bob);
         vault.cancelDeposit(a);
+        vault.processDeposits(1); // the cancelled entry consumes the single op (T-18 bound)
+        assertEq(vault.depositQueueHead(), 1);
+        assertEq(vault.balanceOf(carol), 0);
         vault.processDeposits(1);
         assertEq(vault.depositQueueHead(), 2);
         assertEq(vault.balanceOf(carol), 5e24);
+    }
+
+    function test_processDeposits_stopsWhenCapFullInsteadOfExpiring() public {
+        vm.prank(admin);
+        cap.setCapUSD(address(vault), 20_000e6); // exactly 100 tokens at $200
+        vm.prank(bob);
+        vault.requestDeposit(10e18, bob);
+        _deposit(alice, 100e18); // cap now fully used
+        vault.processDeposits(10);
+        assertEq(uint8(vault.queuedDeposit(0).status), uint8(CoveredCallVault.RequestStatus.QUEUED), "waits");
+        assertEq(vault.depositQueueHead(), 0);
+        vm.prank(alice);
+        vault.withdraw(50e18, alice, alice); // headroom again
+        vault.processDeposits(10);
+        assertEq(uint8(vault.queuedDeposit(0).status), uint8(CoveredCallVault.RequestStatus.EXECUTED));
     }
 
     // ═════════════════════════════ redeem queue ═════════════════════════════
@@ -566,14 +584,17 @@ contract CoveredCallVaultTest is BaseTest {
         vm.expectRevert(abi.encodeWithSelector(CoveredCallVault.ExceedsOffered.selector, offered + 1, offered));
         vault.mintSeries(id, offered + 1, 0);
         vm.stopPrank();
-        // a redeem request during the AUCTION window shrinks free below offered (I-1 re-check at clear)
+        // a redeem request during the AUCTION window does NOT shrink coverage (D-040): the full offer clears
         vm.prank(alice);
         vault.requestRedeem(10e24, alice);
         assertEq(vault.freeAssets(), 90e18);
+        // an issuer burn between open and clear does (I-1 re-check at clear)
+        vm.prank(admin);
+        stock.burn(address(vault), 30e18);
         vm.prank(auction);
-        vm.expectRevert(abi.encodeWithSelector(CoveredCallVault.InsufficientFreeAssets.selector, offered, 90e18));
+        vm.expectRevert(abi.encodeWithSelector(CoveredCallVault.InsufficientCoverage.selector, offered, 70e18));
         vault.mintSeries(id, offered, 0);
-        _clear(id, 90e18, 0);
+        _clear(id, 70e18, 0);
         vm.prank(auction);
         vm.expectRevert(abi.encodeWithSelector(CoveredCallVault.WrongSeriesState.selector, SeriesState.LIVE));
         vault.mintSeries(id, 1, 0);
@@ -654,6 +675,33 @@ contract CoveredCallVaultTest is BaseTest {
 
     // ═════════════════════════════ mintOptions ═════════════════════════════
 
+    function test_processRedeems_afterSkipWithAuctionTimeRequest() public {
+        uint256 shares = _deposit(alice, 100e18);
+        (uint256 id,) = _open(K);
+        vm.prank(alice);
+        vault.requestRedeem(shares, bob);
+        vm.prank(auction);
+        vault.skipSeries(id);
+        vault.processRedeems(5); // IDLE after a skip: executes at the unchanged price
+        assertEq(vault.withdrawalClaimable(bob), 100e18);
+        assertEq(vault.totalSupply(), 0);
+        assertEq(vault.totalAssets(), 0);
+    }
+
+    function test_openSeries_processesOnlyMaxQueueOpsPerOpen() public {
+        vm.prank(admin);
+        vault.setMaxQueueOps(1, 50);
+        _deposit(alice, 100e18);
+        vm.prank(bob);
+        vault.requestDeposit(10e18, bob);
+        vm.prank(carol);
+        vault.requestDeposit(20e18, carol);
+        (, uint256 offered) = _open(K);
+        assertEq(offered, 110e18, "only the first queued deposit executed at open");
+        assertEq(vault.depositQueueHead(), 1);
+        assertEq(vault.queuedDepositTokens(), 20e18);
+    }
+
     function test_mintOptions() public {
         _deposit(alice, 100e18);
         (uint256 id,) = _open(K);
@@ -725,10 +773,14 @@ contract CoveredCallVaultTest is BaseTest {
     function test_settle_resolvedPaths() public {
         _deposit(alice, 100e18);
         (uint256 id,) = _openAndClear(K, 0);
+        vm.prank(settlement);
+        vault.haltSeries(id, "NO_ORACLE_PATH");
         _settle(id, K, 4);
         assertEq(uint8(vault.series(id).state), uint8(SeriesState.RESOLVED));
         _deposit(bob, 1e18);
         (id,) = _openAndClear(K, 0);
+        vm.prank(settlement);
+        vault.haltSeries(id, "JUMP_GUARD");
         _settle(id, K, 5);
         assertEq(uint8(vault.series(id).state), uint8(SeriesState.RESOLVED));
         assertEq(vault.series(id).settlementPath, 5);
@@ -897,12 +949,14 @@ contract CoveredCallVaultTest is BaseTest {
         vm.startPrank(admin);
         vm.expectRevert(CoveredCallVault.OutOfBounds.selector);
         vault.setMaxQueueOps(0, 1);
+        uint256 maxOps = vault.MAX_QUEUE_OPS(); // read outside expectRevert: a view call would be "the next call"
         vm.expectRevert(CoveredCallVault.OutOfBounds.selector);
-        vault.setMaxQueueOps(1, 201);
-        vault.setMaxQueueOps(3, 200);
+        vault.setMaxQueueOps(1, maxOps + 1);
+        vault.setMaxQueueOps(3, maxOps);
         vm.stopPrank();
+        assertEq(maxOps, 100);
         assertEq(vault.maxQueueOpsPerOpen(), 3);
-        assertEq(vault.maxQueueOpsPerSettle(), 200);
+        assertEq(vault.maxQueueOpsPerSettle(), 100);
     }
 
     function test_views_queueLengths() public {

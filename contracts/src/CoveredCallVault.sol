@@ -9,6 +9,7 @@ import {Math} from "@openzeppelin/contracts/utils/math/Math.sol";
 import {SafeCast} from "@openzeppelin/contracts/utils/math/SafeCast.sol";
 import {ReentrancyGuard} from "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
 import {Ownable} from "@openzeppelin/contracts/access/Ownable.sol";
+import {Ownable2Step} from "@openzeppelin/contracts/access/Ownable2Step.sol";
 
 import {IStockToken} from "./interfaces/IStockToken.sol";
 import {IOptionToken} from "./interfaces/IOptionToken.sol";
@@ -22,8 +23,8 @@ import {SeriesKind, SeriesState, VaultState} from "./Types.sol";
 /// calls (SPEC §4, §5, §7, §9.7). Premium is a per-share USDG accumulator outside NAV (D-004). Direct
 /// deposits and withdrawals only in IDLE; queues otherwise (D-006, D-032). `settleSeries` performs no
 /// ERC-20 transfer (THREAT-MODEL T-11); option payouts are pulled through `OptionToken.claim`.
-/// All cross-contract references are immutable; no proxy (D-034).
-contract CoveredCallVault is ERC4626, ReentrancyGuard, Ownable, ICoveredCallVault {
+/// All cross-contract references are immutable; no proxy (D-034). Ownership (the timelock) is two-step.
+contract CoveredCallVault is ERC4626, ReentrancyGuard, Ownable2Step, ICoveredCallVault {
     using SafeERC20 for IERC20;
     using SafeCast for uint256;
 
@@ -33,7 +34,9 @@ contract CoveredCallVault is ERC4626, ReentrancyGuard, Ownable, ICoveredCallVaul
     /// @dev Premium accumulator precision. SPEC §4.2 writes 1e18; shares have 24 decimals (offset 6), so
     /// 1e18 would truncate up to 1 USDG per token-worth of shares. 1e36 bounds the loss to 1e-12 USDG.
     uint256 public constant ACC_PRECISION = 1e36;
-    uint256 public constant MAX_QUEUE_OPS = 200;
+    /// @dev Upper bound for queue ops per settle/open. Gas-measured in `test_T07_settleGasAtMaxQueueOps`:
+    /// 100 redeems + 100 deposits inside one `settleSeries` stay well under the Arbitrum 32 M per-tx limit.
+    uint256 public constant MAX_QUEUE_OPS = 100;
     uint8 internal constant DECIMALS_OFFSET = 6; // SPEC §4.1, THREAT-MODEL T-06
 
     // ───────────────────────────── immutables ─────────────────────────────
@@ -104,6 +107,9 @@ contract CoveredCallVault is ERC4626, ReentrancyGuard, Ownable, ICoveredCallVaul
     RedeemRequest[] internal _redeemQueue;
     uint256 public redeemQueueHead;
 
+    /// @dev Set only while `requestRedeem` moves shares into escrow; every other transfer to the vault reverts.
+    bool private _escrowing;
+
     // ───────────────────────────── errors ─────────────────────────────
 
     error ZeroAddress();
@@ -123,7 +129,8 @@ contract CoveredCallVault is ERC4626, ReentrancyGuard, Ownable, ICoveredCallVaul
     error WrongSeries(uint256 seriesId);
     error WrongSeriesState(SeriesState state);
     error ExceedsOffered(uint256 qty, uint256 offered);
-    error InsufficientFreeAssets(uint256 qty, uint256 free);
+    error InsufficientCoverage(uint256 qty, uint256 available);
+    error CannotTransferToVault();
     error ExceedsFilled(uint256 qty, uint256 remaining);
     error NoSharesForPremium();
     error InvalidPath(uint8 path);
@@ -246,9 +253,19 @@ contract CoveredCallVault is ERC4626, ReentrancyGuard, Ownable, ICoveredCallVaul
         return state == VaultState.IDLE && !sunset && !riskModule.depositsPaused(address(this));
     }
 
+    /// @dev Cap headroom in raw stock units. A reverting cap controller / price source reads as "no price"
+    /// (ok = false): ERC-4626 `max*` views must not revert and settlement must not depend on an oracle (D-041).
+    function _capHeadroom() internal view returns (uint256 remaining, bool ok) {
+        try capController.remainingDepositAssets(address(this), totalAssets()) returns (uint256 rem, bool ok_) {
+            return (rem, ok_);
+        } catch {
+            return (0, false);
+        }
+    }
+
     function maxDeposit(address) public view override returns (uint256) {
         if (!_depositsOpen()) return 0;
-        (uint256 assets, bool ok) = capController.remainingDepositAssets(address(this), totalAssets());
+        (uint256 assets, bool ok) = _capHeadroom();
         return ok ? assets : 0;
     }
 
@@ -269,7 +286,7 @@ contract CoveredCallVault is ERC4626, ReentrancyGuard, Ownable, ICoveredCallVaul
         if (state != VaultState.IDLE) revert VaultNotIdle();
         if (sunset) revert VaultSunsetted();
         if (riskModule.depositsPaused(address(this))) revert DepositsPaused();
-        (, bool ok) = capController.remainingDepositAssets(address(this), totalAssets());
+        (, bool ok) = _capHeadroom();
         if (!ok) revert CapPriceUnavailable();
     }
 
@@ -298,6 +315,7 @@ contract CoveredCallVault is ERC4626, ReentrancyGuard, Ownable, ICoveredCallVaul
     /// @dev Settles premium for both parties on every mint/burn/transfer. The vault's own escrow balance
     /// is skipped: escrowed redeem shares earn nothing and are excluded from the denominator (D-036).
     function _update(address from, address to, uint256 value) internal override {
+        if (to == address(this) && !_escrowing) revert CannotTransferToVault(); // shares sent here would be stranded
         bool trackFrom = from != address(0) && from != address(this);
         bool trackTo = to != address(0) && to != address(this);
         if (trackFrom) _settlePremium(from);
@@ -344,6 +362,7 @@ contract CoveredCallVault is ERC4626, ReentrancyGuard, Ownable, ICoveredCallVaul
     function requestDeposit(uint256 assets, address receiver) external nonReentrant returns (uint256 requestId) {
         if (assets == 0) revert ZeroAmount();
         if (receiver == address(0)) revert ZeroAddress();
+        if (receiver == address(this)) revert CannotTransferToVault();
         if (sunset) revert VaultSunsetted();
         if (riskModule.depositsPaused(address(this))) revert DepositsPaused();
         IERC20(asset()).safeTransferFrom(msg.sender, address(this), assets);
@@ -374,9 +393,13 @@ contract CoveredCallVault is ERC4626, ReentrancyGuard, Ownable, ICoveredCallVaul
         _processDeposits(n);
     }
 
-    /// @dev Bookkeeping only: no ERC-20 transfer. A request that no longer fits the cap is EXPIRED and
-    /// refundable via `cancelDeposit` so the FIFO never blocks (D-037). Stops when no cap price is
-    /// available, deposits are paused or the vault is sunset.
+    /// @dev Bookkeeping only: no ERC-20 transfer. Every visited entry (including cancelled ones) counts
+    /// against `n`, so a run of cancelled entries can never make `settleSeries`/`openSeries` run out of
+    /// gas (THREAT-MODEL T-18). A request larger than the remaining headroom is EXPIRED and refundable via
+    /// `cancelDeposit` (D-037); when the cap is fully used (`remaining == 0`) processing stops instead, so
+    /// filling the cap cannot mass-expire the queue. Stops when the cap price is unavailable or the cap
+    /// controller reverts (settlement must never depend on an external oracle, T-11/T-12), when deposits
+    /// are paused or the vault is sunset.
     function _processDeposits(uint256 n) internal {
         uint256 len = _depositQueue.length;
         uint256 head = depositQueueHead;
@@ -386,11 +409,12 @@ contract CoveredCallVault is ERC4626, ReentrancyGuard, Ownable, ICoveredCallVaul
             if (r.status != RequestStatus.QUEUED) {
                 unchecked {
                     ++head;
+                    --n;
                 }
                 continue;
             }
-            (uint256 remaining, bool ok) = capController.remainingDepositAssets(address(this), totalAssets());
-            if (!ok) break;
+            (uint256 remaining, bool ok) = _capHeadroom();
+            if (!ok || remaining == 0) break;
             uint256 assets = r.assets;
             if (assets > remaining) {
                 r.status = RequestStatus.EXPIRED;
@@ -414,8 +438,11 @@ contract CoveredCallVault is ERC4626, ReentrancyGuard, Ownable, ICoveredCallVaul
     function requestRedeem(uint256 shares, address receiver) external nonReentrant returns (uint256 requestId) {
         if (shares == 0) revert ZeroAmount();
         if (receiver == address(0)) revert ZeroAddress();
+        if (receiver == address(this)) revert CannotTransferToVault();
         if (state == VaultState.IDLE) revert VaultIsIdle();
+        _escrowing = true;
         _transfer(msg.sender, address(this), shares);
+        _escrowing = false;
         escrowedRedeemShares += shares;
         requestId = _redeemQueue.length;
         _redeemQueue.push(
@@ -442,7 +469,8 @@ contract CoveredCallVault is ERC4626, ReentrancyGuard, Ownable, ICoveredCallVaul
         _processRedeems(n);
     }
 
-    /// @dev Bookkeeping only: burns escrowed shares and moves assets into `withdrawalClaimable`.
+    /// @dev Bookkeeping only: burns escrowed shares and moves assets into `withdrawalClaimable`. Every
+    /// visited entry counts against `n` (T-18, see `_processDeposits`).
     function _processRedeems(uint256 n) internal {
         uint256 len = _redeemQueue.length;
         uint256 head = redeemQueueHead;
@@ -451,6 +479,7 @@ contract CoveredCallVault is ERC4626, ReentrancyGuard, Ownable, ICoveredCallVaul
             if (r.status != RequestStatus.QUEUED) {
                 unchecked {
                     ++head;
+                    --n;
                 }
                 continue;
             }
@@ -491,8 +520,11 @@ contract CoveredCallVault is ERC4626, ReentrancyGuard, Ownable, ICoveredCallVaul
         if (riskModule.auctionsPaused(address(this))) return (false, "AUCTIONS_PAUSED");
         if (expiry <= block.timestamp) return (false, "EXPIRY_PAST");
         if (stock.oraclePaused()) return (false, "ORACLE_PAUSED");
+        // D-026 / SPEC §10.3: refuse a staged change inside (now, expiry]. ERC-8056 tokens keep the LAST
+        // effectiveAt after it passed (AAPL: 1786720366 on 2026-09-02, multiplier already applied), so a
+        // past value must not block the vault.
         uint256 effectiveAt = stock.effectiveAt();
-        if (effectiveAt != 0 && effectiveAt <= expiry) return (false, "MULTIPLIER_CHANGE"); // D-026
+        if (effectiveAt > block.timestamp && effectiveAt <= expiry) return (false, "MULTIPLIER_CHANGE");
         return (true, bytes32(0));
     }
 
@@ -537,8 +569,11 @@ contract CoveredCallVault is ERC4626, ReentrancyGuard, Ownable, ICoveredCallVaul
     }
 
     /// @inheritdoc ICoveredCallVault
-    /// @dev AUCTION → LIVE at clearing. Encumbers `filledQty` (≤ offered and ≤ free, SPEC I-1) and pulls
-    /// the net premium from the AuctionHouse. No ERC-1155 mint here (D-024).
+    /// @dev AUCTION → LIVE at clearing. Encumbers `filledQty` (≤ offered and ≤ totalAssets, SPEC I-1) and
+    /// pulls the net premium from the AuctionHouse. No ERC-1155 mint here (D-024). The coverage re-check is
+    /// against `totalAssets()`, not `freeAssets()`: redeem requests filed during the AUCTION window stay inside
+    /// `offeredQty` (D-036, D-040) and are processed only after the encumbrance is released, so they never
+    /// break coverage; checking against `freeAssets()` would let a 1-wei request grief every clear.
     function mintSeries(uint256 seriesId, uint256 filledQty, uint256 premiumNet)
         external
         onlyAuctionHouse
@@ -547,8 +582,8 @@ contract CoveredCallVault is ERC4626, ReentrancyGuard, Ownable, ICoveredCallVaul
         VaultSeries storage s = _currentSeries(seriesId, SeriesState.AUCTION);
         if (filledQty == 0) revert ZeroAmount();
         if (filledQty > s.offeredQty) revert ExceedsOffered(filledQty, s.offeredQty);
-        uint256 free = freeAssets();
-        if (filledQty > free) revert InsufficientFreeAssets(filledQty, free);
+        uint256 available = totalAssets(); // < offeredQty only after an issuer burn between open and clear
+        if (filledQty > available) revert InsufficientCoverage(filledQty, available);
         s.filledQty = filledQty.toUint128();
         s.state = SeriesState.LIVE;
         encumbered += filledQty;
@@ -585,6 +620,8 @@ contract CoveredCallVault is ERC4626, ReentrancyGuard, Ownable, ICoveredCallVaul
         if (s.state != SeriesState.LIVE && s.state != SeriesState.HALTED) revert WrongSeriesState(s.state);
         if (price8 == 0) revert ZeroPrice();
         if (path == 0 || path > 5) revert InvalidPath(path);
+        // SPEC §4.4 / §9.6: LIVE settles on an oracle path (1-3); HALTED exits only through a resolution (4-5).
+        if (s.state == SeriesState.HALTED ? path < 4 : path > 3) revert InvalidPath(path);
 
         uint256 filled = s.filledQty;
         uint256 strike = s.strike;

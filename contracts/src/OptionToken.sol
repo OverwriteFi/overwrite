@@ -4,6 +4,7 @@ pragma solidity 0.8.26;
 import {ERC1155} from "@openzeppelin/contracts/token/ERC1155/ERC1155.sol";
 import {ERC1155Supply} from "@openzeppelin/contracts/token/ERC1155/extensions/ERC1155Supply.sol";
 import {Ownable} from "@openzeppelin/contracts/access/Ownable.sol";
+import {Ownable2Step} from "@openzeppelin/contracts/access/Ownable2Step.sol";
 import {IOptionToken} from "./interfaces/IOptionToken.sol";
 import {ICoveredCallVault} from "./interfaces/ICoveredCallVault.sol";
 import {SeriesKind} from "./Types.sol";
@@ -13,7 +14,7 @@ import {SeriesKind} from "./Types.sol";
 /// Ids are an incrementing counter; (vault, underlying, kind, strike, expiry) are stored per id.
 /// Only the registered vault of an underlying can create series and mint/burn its ids. Holders
 /// call `claim` after settlement; the token burns and asks the vault to pay out stock tokens.
-contract OptionToken is ERC1155Supply, Ownable, IOptionToken {
+contract OptionToken is ERC1155Supply, Ownable2Step, IOptionToken {
     uint256 public nextSeriesId = 1;
     mapping(address underlying => address vault) public vaultOf;
     mapping(address vault => bool) public isVault;

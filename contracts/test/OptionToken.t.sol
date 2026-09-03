@@ -6,6 +6,7 @@ import {OptionToken} from "../src/OptionToken.sol";
 import {IOptionToken} from "../src/interfaces/IOptionToken.sol";
 import {SeriesKind} from "../src/Types.sol";
 import {Ownable} from "@openzeppelin/contracts/access/Ownable.sol";
+import {IERC1155Errors} from "@openzeppelin/contracts/interfaces/draft-IERC6093.sol";
 
 contract OptionTokenTest is BaseTest {
     address internal underlying2 = makeAddr("underlying2");
@@ -198,6 +199,16 @@ contract OptionTokenTest is BaseTest {
         assertEq(stock.balanceOf(carol) - 1_000_000e18, gotBob);
         assertEq(gotBob + gotMm, filled * _ppo(250e8, 200e8) / WAD);
         assertEq(vault.payoutOwed(), 0);
+    }
+
+    function test_claim_nonHolderReverts() public {
+        _deposit(alice, 100e18);
+        (uint256 id, uint256 filled) = _openAndClear(200e8, 0);
+        _mintOptions(id, mm, filled);
+        _settle(id, 250e8, 1);
+        vm.prank(bob);
+        vm.expectRevert(abi.encodeWithSelector(IERC1155Errors.ERC1155InsufficientBalance.selector, bob, 0, 1, id));
+        opt.claim(id, 1, bob);
     }
 
     function test_claim_otmBurnsAndPaysZero() public {

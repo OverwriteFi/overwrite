@@ -21,10 +21,16 @@ test/
   Base.t.sol                fixture: one vault wired to mocks; AuctionHouse and Settlement are plain addresses
   CoveredCallVault.t.sol    unit tests, one per external function incl. every revert path
   CoveredCallVault.fuzz.t.sol  fuzz: deposit/withdraw math, coverage bound, payout formula, queues, premium split
+  CoveredCallVault.threats.t.sol  THREAT-MODEL regressions (`test_Txx_…`): T-18 queue flood, T-11 paused token / issuer burn,
+                            T-12 dead cap oracle, T-10 retained effectiveAt, T-14 path/state, T-09 shares to vault, T-16 reentrancy,
+                            T-15 guardian scope, T-07 gas at MAX_QUEUE_OPS
   OptionToken.t.sol, CapController.t.sol
-  invariants/               VaultHandler (guarded actions + ghosts) and VaultInvariants (I1–I4 of the brief, SPEC I-1/I-2/I-3/I-4/I-6/I-8)
+  invariants/               VaultHandler (guarded actions + ghosts; plays depositors, AuctionHouse, Settlement, issuer, guardian,
+                            timelock and a reentrant ERC-1155 receiver) and VaultInvariants (I1–I4 of the brief, SPEC I-1/I-2/I-3/I-4/I-8/I-15/I-16, T-16)
   mocks/                    MockRiskModule, MockPriceSource, MockSafetyModule
 ```
+
+Foundry gotcha that bit this codebase three times: `vm.prank(x)` and `vm.expectRevert(...)` apply to the **very next call**, and a view read such as `vault.currentSeriesId()` or `vault.MAX_QUEUE_OPS()` inside the argument list counts. Read arguments into locals first.
 
 Not yet built (next phases): AuctionHouse, SettlementOracle (owns the §9 oracle policy and implements `IPriceSource`), RiskModule, FeeRouter, BondManager, VaultFactory, deploy script.
 

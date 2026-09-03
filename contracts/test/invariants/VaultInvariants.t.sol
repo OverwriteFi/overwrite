@@ -6,7 +6,8 @@ import {VaultHandler} from "./VaultHandler.sol";
 import {ICoveredCallVault} from "../../src/interfaces/ICoveredCallVault.sol";
 import {SeriesState, VaultState} from "../../src/Types.sol";
 
-/// @dev Stateful invariants for CoveredCallVault + OptionToken (brief I1–I4, SPEC §17 I-1, I-2, I-3, I-4, I-6, I-8).
+/// @dev Stateful invariants for CoveredCallVault + OptionToken (brief I1–I4, SPEC §17 I-1, I-2, I-3, I-4, I-8, I-16).
+/// The handler includes issuer burns and pauses, guardian pauses, sunset, cap changes and a reentrant receiver.
 contract VaultInvariants is BaseTest {
     VaultHandler internal h;
 
@@ -17,16 +18,18 @@ contract VaultInvariants is BaseTest {
         actors[1] = bob;
         actors[2] = carol;
         actors[3] = mm;
-        h = new VaultHandler(vault, opt, stock, usdg, risk, admin, auction, settlement, actors);
+        h = new VaultHandler(vault, opt, cap, stock, usdg, risk, priceSource, admin, auction, settlement, actors);
         targetContract(address(h));
     }
 
-    /// I1: encumbered ≤ balance and ≤ totalAssets (SPEC I-1 coverage).
+    /// I1: encumbered ≤ balance always; ≤ totalAssets unless the issuer burned vault tokens (SPEC I-1 coverage).
     function invariant_I1_encumberedCovered() public view {
         uint256 enc = vault.encumbered();
-        assertLe(enc, stock.balanceOf(address(vault)), "I1: encumbered <= balance");
-        assertLe(enc, vault.totalAssets(), "I1: encumbered <= totalAssets");
-        // the live series' filledQty is exactly the encumbrance
+        assertLe(enc, stock.balanceOf(address(vault)) + h.issuerBurned(), "I1: encumbered <= balance (+ issuer burn)");
+        if (h.issuerBurned() == 0) {
+            assertLe(enc, stock.balanceOf(address(vault)), "I1: encumbered <= balance");
+            assertLe(enc, vault.totalAssets(), "I1: encumbered <= totalAssets");
+        }
         if (vault.state() == VaultState.LIVE || vault.state() == VaultState.HALTED) {
             assertEq(enc, vault.series(vault.currentSeriesId()).filledQty, "I1: encumbered == filledQty");
         }
@@ -40,11 +43,12 @@ contract VaultInvariants is BaseTest {
         }
         sum += vault.convertToAssets(vault.balanceOf(address(vault))); // escrowed redeem shares
         assertLe(sum, vault.totalAssets(), "I2: sum of share claims <= totalAssets");
-        assertEq(
-            vault.totalAssets() + vault.payoutOwed() + vault.withdrawalClaimableTotal() + vault.queuedDepositTokens(),
-            stock.balanceOf(address(vault)),
-            "I2: totalAssets + owed == balance"
-        );
+        uint256 owed = vault.payoutOwed() + vault.withdrawalClaimableTotal() + vault.queuedDepositTokens();
+        uint256 bal = stock.balanceOf(address(vault));
+        // holds even after issuer burns of NAV: payouts are always set against what was available at settlement
+        // (SPEC §9.7 step 5), so owed amounts never exceed the balance
+        assertEq(vault.totalAssets() + owed, bal, "I2: totalAssets + owed == balance");
+        assertLe(vault.payoutOwed(), bal, "I-2: payoutOwed backed");
     }
 
     /// I3: after settlement no series remains encumbered; IDLE means zero encumbrance.
@@ -57,6 +61,7 @@ contract VaultInvariants is BaseTest {
             } else if (s.state == SeriesState.SETTLED || s.state == SeriesState.RESOLVED) {
                 assertTrue(opt.series(h.seriesIds(i)).settled, "I3: settled flag");
                 assertLt(s.payoutPerOption, 1e18, "I-2: payoutPerOption < 1e18");
+                assertTrue((s.state == SeriesState.RESOLVED) == (s.settlementPath >= 4), "path 4/5 <=> RESOLVED");
             }
         }
         assertEq(vault.encumbered(), expected, "I3: encumbered == sum of live filledQty");
@@ -68,7 +73,8 @@ contract VaultInvariants is BaseTest {
         assertEq(h.zeroPayoutPriceDrops(), 0, "I4");
     }
 
-    /// SPEC I-8 (relaxed to non-decreasing for rounding): the share price only falls inside a paying settlement.
+    /// SPEC I-8 (relaxed to non-decreasing for rounding): the share price only falls inside a paying settlement
+    /// or through an issuer burn.
     function invariant_I8_priceNonDecreasingOutsideSettlement() public view {
         assertEq(h.nonSettlePriceDrops(), 0, "I-8");
     }
@@ -84,8 +90,8 @@ contract VaultInvariants is BaseTest {
         assertLe(claimable + h.premiumClaimed(), h.premiumAccrued(), "I-4: never over-distribute");
     }
 
-    /// Option supply accounting (SPEC I-3 second clause) and escrow bookkeeping.
-    function invariant_optionSupplyAndEscrow() public view {
+    /// SPEC I-16: option supply accounting and escrow bookkeeping.
+    function invariant_I16_optionSupplyAndEscrow() public view {
         for (uint256 i; i < h.seriesCount(); ++i) {
             uint256 id = h.seriesIds(i);
             ICoveredCallVault.VaultSeries memory s = vault.series(id);
@@ -95,8 +101,17 @@ contract VaultInvariants is BaseTest {
         assertEq(vault.balanceOf(address(vault)), vault.escrowedRedeemShares(), "escrow == vault share balance");
     }
 
-    function invariant_callSummary() public view {
-        // informational: printed with -vv on failure only; keeps the handler exercised
-        assertGe(h.calls(), 0);
+    /// T-16: no reentrancy from the ERC-1155 receiver callback ever succeeds.
+    function invariant_T16_noReentrancy() public view {
+        assertEq(h.reenterer().reentrySuccesses(), 0, "T-16");
+    }
+
+    /// Guardian / sunset scope (SPEC §15, I-15): pauses and sunset never lock funds once the vault is IDLE.
+    function invariant_I15_idleAlwaysWithdrawable() public view {
+        if (vault.state() != VaultState.IDLE) return;
+        for (uint256 i; i < h.actorCount(); ++i) {
+            address a = h.actors(i);
+            assertEq(vault.maxRedeem(a), vault.balanceOf(a), "I-15: IDLE => all shares redeemable");
+        }
     }
 }

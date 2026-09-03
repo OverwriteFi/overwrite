@@ -98,6 +98,17 @@ contract CapControllerTest is BaseTest {
         assertEq(assets, 500e18); // 100 000 / 200
     }
 
+    function test_setSafetyModule_zeroRejectedInSafetyModuleMode() public {
+        _enableSafetyModule(100_000e6, 10_000);
+        vm.startPrank(admin);
+        vm.expectRevert(CapController.SafetyModuleNotSet.selector);
+        cap.setSafetyModule(address(0));
+        cap.setCapMode(CapController.CapMode.FIXED);
+        cap.setSafetyModule(address(0)); // allowed once FIXED
+        vm.stopPrank();
+        assertEq(address(cap.safetyModule()), address(0));
+    }
+
     function test_switchBackToFixed() public {
         _enableSafetyModule(100_000e6, 10_000);
         vm.prank(admin);

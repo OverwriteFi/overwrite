@@ -2,6 +2,7 @@
 pragma solidity 0.8.26;
 
 import {Ownable} from "@openzeppelin/contracts/access/Ownable.sol";
+import {Ownable2Step} from "@openzeppelin/contracts/access/Ownable2Step.sol";
 import {Math} from "@openzeppelin/contracts/utils/math/Math.sol";
 import {ICapController} from "./interfaces/ICapController.sol";
 import {IPriceSource} from "./interfaces/IPriceSource.sol";
@@ -13,7 +14,7 @@ import {ISafetyModule} from "./interfaces/ISafetyModule.sol";
 ///  - SAFETY_MODULE: `globalCap = k × safetyModule.valueUSD()`, per-vault share `capWeightBps`,
 ///    optionally still ceilinged by `capUSD[vault]`.
 /// Caps limit deposits only; they never force withdrawals.
-contract CapController is Ownable, ICapController {
+contract CapController is Ownable2Step, ICapController {
     enum CapMode {
         FIXED,
         SAFETY_MODULE
@@ -53,7 +54,10 @@ contract CapController is Ownable, ICapController {
         priceSource = IPriceSource(src);
     }
 
+    /// @dev Clearing the module while SAFETY_MODULE mode is active would make every cap read revert
+    /// (blocking deposits, queue processing, `openSeries`); switch to FIXED first.
     function setSafetyModule(address sm) external onlyOwner {
+        if (sm == address(0) && capMode == CapMode.SAFETY_MODULE) revert SafetyModuleNotSet();
         emit ParameterChanged(address(this), "safetyModule", uint160(address(safetyModule)), uint160(sm));
         safetyModule = ISafetyModule(sm);
     }
@@ -86,7 +90,8 @@ contract CapController is Ownable, ICapController {
 
     // ───────────────────────────── views ─────────────────────────────
 
-    /// @notice Effective USD cap (6 dec) for a vault under the current mode.
+    /// @notice Effective USD cap (6 dec) for a vault under the current mode. In FIXED mode `capUSD == 0`
+    /// means "no deposits"; in SAFETY_MODULE mode it means "no extra ceiling" (the weight alone applies).
     function vaultCapUSD(address vault) public view returns (uint256) {
         if (capMode == CapMode.FIXED) return capUSD[vault];
         uint256 globalCap = Math.mulDiv(safetyModule.valueUSD(), k, 1e18);
