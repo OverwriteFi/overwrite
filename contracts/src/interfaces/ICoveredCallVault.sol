@@ -2,6 +2,7 @@
 pragma solidity 0.8.26;
 
 import {SeriesKind, SeriesState, VaultState} from "../Types.sol";
+import {IOptionToken} from "./IOptionToken.sol";
 
 /// @notice Vault surface used by AuctionHouse, SettlementOracle and OptionToken (SPEC §3, §4).
 interface ICoveredCallVault {
@@ -36,6 +37,8 @@ interface ICoveredCallVault {
     function payOptionClaim(uint256 seriesId, address to, uint256 qty) external returns (uint256 tokens);
 
     // Views
+    function auctionHouse() external view returns (address);
+    function optionToken() external view returns (IOptionToken);
     function state() external view returns (VaultState);
     function currentSeriesId() external view returns (uint256);
     function series(uint256 seriesId) external view returns (VaultSeries memory);

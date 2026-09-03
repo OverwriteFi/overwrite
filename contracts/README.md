@@ -15,24 +15,41 @@ src/
   CoveredCallVault.sol      ERC-4626 vault: windows, queues, premium accumulator, series lifecycle (SPEC §4, §5, §9.7)
   OptionToken.sol           ERC-1155 options, one id per series, vault-only mint/burn, claim → payout (SPEC §3, §9.7)
   CapController.sol         deposit caps, FIXED / SAFETY_MODULE switch (SPEC §12)
-  interfaces/               IStockToken (ERC-8056), IRiskModule, ICapController, IPriceSource, ISafetyModule, IOptionToken, ICoveredCallVault
-  mocks/                    MockStockToken, MockUSDG (testnet mocks, SPEC §1.8 / D-014)
+  AuctionHouse.sol          weekly uniform-price auctions: schedule checks, on-chain strike, bids + escrow, clearing with
+                            pro-rata at the margin, pull refunds / options / payout, bond locks (SPEC §5, §7.2, §8, D-043…D-048)
+  BondManager.sol           MM and curator bonds in USDG, participation locks, 7-day cooldown, timelock slashing (SPEC §13)
+  FeeRouter.sol             performance fee booked at clearing, permissionless flush to treasury; WRITE mode gated (SPEC §11)
+  interfaces/               IStockToken (ERC-8056), IRiskModule, ICapController, IPriceSource, ISafetyModule, IOptionToken,
+                            ICoveredCallVault, IAuctionHouse, IBondManager, IFeeRouter
+  mocks/                    MockStockToken, MockUSDG (testnet mocks, SPEC §1.8 / D-014; USDG has `paused()` / `isFrozen()`)
 test/
   Base.t.sol                fixture: one vault wired to mocks; AuctionHouse and Settlement are plain addresses
+  AuctionBase.t.sol         fixture: real AuctionHouse + BondManager + FeeRouter wired to a vault, four bonded MMs, Monday 14:00
   CoveredCallVault.t.sol    unit tests, one per external function incl. every revert path
   CoveredCallVault.fuzz.t.sol  fuzz: deposit/withdraw math, coverage bound, payout formula, queues, premium split
   CoveredCallVault.threats.t.sol  THREAT-MODEL regressions (`test_Txx_…`): T-18 queue flood, T-11 paused token / issuer burn,
                             T-12 dead cap oracle, T-10 retained effectiveAt, T-14 path/state, T-09 shares to vault, T-16 reentrancy,
                             T-15 guardian scope, T-07 gas at MAX_QUEUE_OPS
-  OptionToken.t.sol, CapController.t.sol
-  invariants/               VaultHandler (guarded actions + ghosts; plays depositors, AuctionHouse, Settlement, issuer, guardian,
-                            timelock and a reentrant ERC-1155 receiver) and VaultInvariants (I1–I4 of the brief, SPEC I-1/I-2/I-3/I-4/I-8/I-15/I-16, T-16)
+  AuctionHouse.t.sol        unit: registerVault, openAuction (schedule, distance, reserve, S_ref), bid, clear (single, multi,
+                            undersubscribed, pro-rata + dust, every skip path), withdrawRefund, claimOptions, claimPayout,
+                            releaseLocks, setters, one end-to-end week
+  AuctionHouse.fuzz.t.sol   ClearingHarness over the pure clearing math (no over-allocation, price priority, pro-rata prefix),
+                            escrow conservation to the unit through the real contract (parsed BidFilled logs), preview == clear,
+                            strike grid, reserve bounds
+  AuctionHouse.threats.t.sol  T-07 (escrow, 64/8 caps, frozen bidder, non-receiver bidder, bond lock, 64-bidder gas), T-12,
+                            T-13/T-19, T-04, T-09, T-05, T-16
+  OptionToken.t.sol, CapController.t.sol, BondManager.t.sol, FeeRouter.t.sol
+  invariants/               VaultHandler + VaultInvariants (vault layer) and AuctionHandler + AuctionInvariants (I-3 exact escrow
+                            conservation, allocation identity, fee conservation, I-13 bond locks, preview == clear, auction OPEN ⇔
+                            vault AUCTION; the handler plays depositors, MMs, keeper, settlement, issuer, Paxos freeze, timelock)
   mocks/                    MockRiskModule, MockPriceSource, MockSafetyModule
 ```
 
-Foundry gotcha that bit this codebase three times: `vm.prank(x)` and `vm.expectRevert(...)` apply to the **very next call**, and a view read such as `vault.currentSeriesId()` or `vault.MAX_QUEUE_OPS()` inside the argument list counts. Read arguments into locals first.
+Foundry gotcha that bit this codebase more than five times: `vm.prank(x)` and `vm.expectRevert(...)` apply to the **very next call**, and a view read such as `vault.currentSeriesId()`, `ah.KEEPER_ROLE()` or `usdg.balanceOf(x)` inside the argument list counts. Read arguments into locals first. `vm.expectEmit` has the same shape: put it right before the emitting call, not before a helper that makes a view call or a mint first.
 
-Not yet built (next phases): AuctionHouse, SettlementOracle (owns the §9 oracle policy and implements `IPriceSource`), RiskModule, FeeRouter, BondManager, VaultFactory, deploy script.
+Deployment order (D-044): BondManager and FeeRouter first, then AuctionHouse (holds them as immutables), then `setAuctionHouse` on both, then each vault with `auctionHouse = AuctionHouse` (immutable), then `AuctionHouse.registerVault(vault)` and `setKeeper`.
+
+Not yet built (next phases): SettlementOracle (owns the §9 oracle policy, implements `IPriceSource` for both CapController and AuctionHouse, takes over the D-031 parameter snapshot), RiskModule, VaultFactory, deploy script + fork test asserting the wiring. WRITE mode of FeeRouter and the WRITE bond migration are post-token.
 
 ## Run
 
