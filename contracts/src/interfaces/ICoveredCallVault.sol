@@ -4,6 +4,8 @@ pragma solidity 0.8.26;
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {SeriesKind, SeriesState, VaultState} from "../Types.sol";
 import {IOptionToken} from "./IOptionToken.sol";
+import {IRiskModule} from "./IRiskModule.sol";
+import {IStockToken} from "./IStockToken.sol";
 
 /// @notice Vault surface used by AuctionHouse, SettlementOracle and OptionToken (SPEC §3, §4).
 interface ICoveredCallVault {
@@ -39,6 +41,9 @@ interface ICoveredCallVault {
 
     // Views
     function auctionHouse() external view returns (address);
+    function settlement() external view returns (address);
+    function riskModule() external view returns (IRiskModule);
+    function stock() external view returns (IStockToken);
     function optionToken() external view returns (IOptionToken);
     function usdg() external view returns (IERC20);
     function state() external view returns (VaultState);

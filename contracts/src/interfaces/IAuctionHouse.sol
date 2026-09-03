@@ -51,6 +51,7 @@ interface IAuctionHouse {
     function claimPayout(uint256 seriesId, address to) external returns (uint256 qty, uint256 tokens);
     function releaseLocks(uint256 seriesId) external;
 
+    function isVault(address vault) external view returns (bool);
     function auctions(uint256 seriesId) external view returns (Auction memory);
     function bids(uint256 seriesId) external view returns (Bid[] memory);
     function bidders(uint256 seriesId) external view returns (address[] memory);

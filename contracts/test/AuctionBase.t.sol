@@ -59,7 +59,7 @@ abstract contract AuctionBaseTest is Test {
         vm.warp(START_TS);
         stock = new MockStockToken("Mock NVDA", "NVDA", admin);
         usdg = new MockUSDG();
-        risk = new MockRiskModule();
+        address riskAddr = _deployRiskModule();
         priceSource = new MockPriceSource();
         safetyModule = new MockSafetyModule();
         cap = new CapController(admin, address(priceSource));
@@ -73,8 +73,8 @@ abstract contract AuctionBaseTest is Test {
                 usdg: address(usdg),
                 optionToken: address(opt),
                 auctionHouse: address(ah),
-                settlement: settlement,
-                riskModule: address(risk),
+                settlement: _deploySettlement(address(ah)),
+                riskModule: riskAddr,
                 capController: address(cap),
                 owner: admin,
                 name: "Overwrite NVDA",
@@ -111,6 +111,19 @@ abstract contract AuctionBaseTest is Test {
         vm.label(address(stock), "stock");
         vm.label(address(usdg), "usdg");
         vm.warp(MONDAY_1400);
+    }
+
+    // ───────────────────────────── hooks (overridden by SettlementBaseTest) ─────────────────────────────
+
+    /// @dev The vault's `riskModule` is immutable; subclasses deploy the real RiskModule here.
+    function _deployRiskModule() internal virtual returns (address) {
+        risk = new MockRiskModule();
+        return address(risk);
+    }
+
+    /// @dev The vault's `settlement` is immutable; subclasses deploy the real SettlementOracle here (after `ah`).
+    function _deploySettlement(address) internal virtual returns (address) {
+        return settlement;
     }
 
     // ───────────────────────────── helpers ─────────────────────────────
@@ -174,7 +187,7 @@ abstract contract AuctionBaseTest is Test {
     }
 
     /// @dev Warps to expiry if needed and settles on path 1 (the SettlementOracle is a plain address here).
-    function _settle(uint256 id, uint128 price) internal {
+    function _settle(uint256 id, uint128 price) internal virtual {
         uint64 e = vault.series(id).expiry;
         if (block.timestamp < e) vm.warp(e);
         vm.prank(settlement);
