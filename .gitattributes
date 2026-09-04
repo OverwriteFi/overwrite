@@ -1,0 +1,6 @@
+# The repo is developed on Windows (core.autocrlf=true) but every tool that reads these files
+# — forge fmt, slither, the CI-profile test runs — expects LF. Without this, `forge fmt --check`
+# reported whole-file diffs on 55 files that were formatted correctly.
+* text=auto eol=lf
+
+*.ico binary
