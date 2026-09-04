@@ -27,6 +27,7 @@ contract OptionToken is ERC1155Supply, Ownable2Step, IOptionToken {
     error AlreadySettled(uint256 id);
     error NotSettled(uint256 id);
     error ZeroQty();
+    error PayoutNotRaised(uint256 id);
 
     event VaultRegistered(address indexed underlying, address indexed vault);
     event SeriesCreated(
@@ -39,6 +40,7 @@ contract OptionToken is ERC1155Supply, Ownable2Step, IOptionToken {
         uint256 multiplierAtCreation
     );
     event SeriesSettled(uint256 indexed id, uint128 settlementPrice, uint128 payoutPerOption);
+    event PayoutRaised(uint256 indexed id, uint128 payoutPerOption);
     event OptionClaimed(
         uint256 indexed seriesId, address indexed holder, address indexed to, uint256 qty, uint256 tokens
     );
@@ -102,6 +104,18 @@ contract OptionToken is ERC1155Supply, Ownable2Step, IOptionToken {
         s.settlementPrice = settlementPrice;
         s.payoutPerOption = payoutPerOption;
         emit SeriesSettled(id, settlementPrice, payoutPerOption);
+    }
+
+    /// @notice Raises the mirrored payout after the vault's timelock injected coverage (SPEC §14). `markSettled`
+    /// is one-shot, so this is the only way the mirror can follow a shortfall being repaired.
+    /// @dev Moves no money: `claim` always prices from the vault, which is authoritative. This copy exists for
+    /// indexers and the frontend, and must not keep showing the scaled rate after an injection (D-099).
+    function raisePayout(uint256 id, uint128 payoutPerOption) external onlySeriesVault(id) {
+        SeriesInfo storage s = _series[id];
+        if (!s.settled) revert NotSettled(id);
+        if (payoutPerOption <= s.payoutPerOption) revert PayoutNotRaised(id);
+        s.payoutPerOption = payoutPerOption;
+        emit PayoutRaised(id, payoutPerOption);
     }
 
     // ───────────────────────────── holders ─────────────────────────────

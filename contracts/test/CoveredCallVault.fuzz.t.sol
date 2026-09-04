@@ -3,6 +3,7 @@ pragma solidity 0.8.26;
 
 import {BaseTest} from "./Base.t.sol";
 import {CoveredCallVault} from "../src/CoveredCallVault.sol";
+import {ICoveredCallVault} from "../src/interfaces/ICoveredCallVault.sol";
 import {SeriesKind} from "../src/Types.sol";
 
 contract CoveredCallVaultFuzzTest is BaseTest {
@@ -119,6 +120,122 @@ contract CoveredCallVaultFuzzTest is BaseTest {
         assertLe(vault.payoutOwed(), stock.balanceOf(address(vault)), "I-2: payoutOwed backed");
         assertEq(vault.totalAssets() + vault.payoutOwed(), stock.balanceOf(address(vault)));
         assertEq(vault.encumbered(), 0, "I3: nothing encumbered after settlement");
+    }
+
+    // ───────────────────────────── injectCoverage (SPEC §14) ─────────────────────────────
+
+    /// @dev Settles a series whose payout was scaled down by an issuer burn. The bounds guarantee a shortfall:
+    /// `s > 2k` puts the unscaled payout above 0.5, and at least half the collateral is burned.
+    function _shortfall(uint128 s, uint128 k, uint256 dep, uint256 burnBps)
+        internal
+        returns (uint256 id, uint256 filled)
+    {
+        _deposit(alice, dep);
+        (id, filled) = _openAndClear(k, 0);
+        _mintOptions(id, mm, filled);
+        vm.prank(admin);
+        stock.burn(address(vault), dep * burnBps / 10_000);
+        _settle(id, s, 1);
+    }
+
+    /// @dev Reference implementation of the injection maths in plain arithmetic (SPEC §14): `rem` and the
+    /// payouts are well under 2^128, so no product here can overflow. Used both to skip draws too small to
+    /// move the rate by one wei — a documented revert, not a property under test — and to cross-check `mulDiv`.
+    function _previewInject(uint256 id, uint256 tokens, uint256 full) internal view returns (uint256 pulled) {
+        ICoveredCallVault.VaultSeries memory sr = vault.series(id);
+        uint256 rem = sr.filledQty - sr.claimedQty;
+        uint256 ppoOld = sr.payoutPerOption;
+        uint256 owedNow = rem * ppoOld / WAD;
+        uint256 need = rem * full / WAD - owedNow;
+        uint256 budget = tokens < need ? tokens : need;
+        uint256 ppoNew = budget == need ? full : ppoOld + budget * WAD / rem;
+        pulled = rem * ppoNew / WAD - owedNow;
+    }
+
+    function _inject(uint256 id, uint256 tokens) internal returns (uint256 pulled) {
+        vm.startPrank(admin);
+        stock.mint(admin, tokens);
+        stock.approve(address(vault), tokens);
+        uint256 before = stock.balanceOf(admin);
+        vault.injectCoverage(id, tokens);
+        pulled = before - stock.balanceOf(admin);
+        vm.stopPrank();
+    }
+
+    /// @dev An injection never raises the payout past the unscaled value, never pulls more than it was
+    /// offered, and never moves the share price — whatever the caller passes.
+    function testFuzz_injectCoverageNeverExceedsUnscaled(
+        uint128 s,
+        uint128 k,
+        uint256 dep,
+        uint256 burnBps,
+        uint256 tokensSeed
+    ) public {
+        k = uint128(bound(k, 1e8, 1_000e8));
+        s = uint128(bound(s, uint256(k) * 2 + 1, 10_000e8));
+        dep = bound(dep, 1e18, MAX_DEP);
+        burnBps = bound(burnBps, 5_000, 9_900);
+        (uint256 id,) = _shortfall(s, k, dep, burnBps);
+
+        uint256 full = _ppo(s, k);
+        uint256 need = vault.coverageNeeded(id);
+        assertGt(need, 0, "the bounds guarantee a shortfall");
+        uint256 tokens = bound(tokensSeed, 1, need * 3 + 1);
+        uint256 expected = _previewInject(id, tokens, full);
+        if (expected == 0) return;
+
+        uint256 priceBefore = _sharePrice();
+        uint256 pulled = _inject(id, tokens);
+        assertEq(pulled, expected, "matches the reference maths");
+
+        uint256 ppo = vault.series(id).payoutPerOption;
+        assertLe(ppo, full, "never above the unscaled payout");
+        assertLt(ppo, WAD, "I-2: payoutPerOption < 1e18");
+        assertLe(pulled, tokens, "`tokens` is an upper bound");
+        assertEq(_sharePrice(), priceBefore, "the share price never moves");
+        assertLe(vault.payoutOwed(), stock.balanceOf(address(vault)), "I-2: payoutOwed backed");
+        assertEq(opt.series(id).payoutPerOption, ppo, "the OptionToken mirror follows");
+        if (tokens >= need) {
+            assertEq(ppo, full, "a sufficient injection restores 100 %");
+            assertEq(pulled, need, "and pulls exactly what was needed");
+            assertEq(vault.coverageNeeded(id), 0);
+        }
+    }
+
+    /// @dev Claims before and after an injection can never underflow `payoutOwed`, however the raise is split.
+    function testFuzz_injectCoverageClaimsNeverUnderflow(
+        uint128 s,
+        uint128 k,
+        uint256 dep,
+        uint256 burnBps,
+        uint256 claimBps,
+        uint256 tokensSeed
+    ) public {
+        k = uint128(bound(k, 1e8, 1_000e8));
+        s = uint128(bound(s, uint256(k) * 2 + 1, 10_000e8));
+        dep = bound(dep, 1e18, MAX_DEP);
+        burnBps = bound(burnBps, 5_000, 9_900);
+        (uint256 id, uint256 filled) = _shortfall(s, k, dep, burnBps);
+
+        uint256 first = filled * bound(claimBps, 0, 9_999) / 10_000;
+        if (first > 0) {
+            vm.prank(mm);
+            opt.claim(id, first, mm);
+        }
+
+        uint256 rem = filled - first;
+        uint256 need = vault.coverageNeeded(id);
+        if (need == 0) return; // everything already claimed at the scaled rate
+        uint256 tokens = bound(tokensSeed, 1, need * 3 + 1);
+        if (_previewInject(id, tokens, _ppo(s, k)) == 0) return;
+        _inject(id, tokens);
+
+        // the remainder must still be claimable: `payoutOwed` is never left short of what it owes
+        vm.prank(mm);
+        opt.claim(id, rem, mm);
+        assertEq(vault.series(id).claimedQty, filled, "every option was claimed");
+        assertLe(vault.payoutOwed(), 1, "at most one wei of settlement rounding dust is left behind");
+        assertLe(vault.payoutOwed(), stock.balanceOf(address(vault)), "I-2: payoutOwed backed");
     }
 
     function testFuzz_zeroPayoutNeverLowersSharePrice(uint128 s, uint128 k, uint256 dep, uint256 premium) public {

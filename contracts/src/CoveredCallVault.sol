@@ -139,6 +139,7 @@ contract CoveredCallVault is ERC4626, ReentrancyGuard, Ownable2Step, ICoveredCal
     error BadRequestStatus(RequestStatus status);
     error NothingToClaim();
     error OutOfBounds();
+    error NoShortfall(uint256 seriesId);
 
     // ───────────────────────────── events (SPEC §16.1) ─────────────────────────────
 
@@ -155,6 +156,7 @@ contract CoveredCallVault is ERC4626, ReentrancyGuard, Ownable2Step, ICoveredCal
     event VaultStateChanged(VaultState from, VaultState to);
     event VaultSunset();
     event ShortfallRecorded(uint256 indexed seriesId, uint256 tokensShort);
+    event CoverageInjected(uint256 indexed seriesId, uint256 tokens);
     event SeriesOpened(
         uint256 indexed seriesId,
         SeriesKind kind,
@@ -685,6 +687,15 @@ contract CoveredCallVault is ERC4626, ReentrancyGuard, Ownable2Step, ICoveredCal
         emit OptionPaid(seriesId, to, qty, tokens);
     }
 
+    /// @dev SPEC §7.1 recomputed from the stored settlement price and strike: the payout `settleSeries` would
+    /// have written without the §9.7 step 5 scaling. Both are USD per **raw** token and are never multiplier-
+    /// adjusted (SPEC §10.2), so this stays exact for the life of the series, splits and dividends included.
+    function _unscaledPayout(VaultSeries storage s) internal view returns (uint256) {
+        uint256 price = s.settlementPrice;
+        uint256 strike = s.strike;
+        return price > strike ? Math.mulDiv(price - strike, WAD, price) : 0;
+    }
+
     function _currentSeries(uint256 seriesId, SeriesState expected) internal view returns (VaultSeries storage s) {
         if (seriesId != currentSeriesId) revert WrongSeries(seriesId);
         s = _series[seriesId];
@@ -716,7 +727,54 @@ contract CoveredCallVault is ERC4626, ReentrancyGuard, Ownable2Step, ICoveredCal
         maxQueueOpsPerSettle = perSettle;
     }
 
+    /// @notice Covers a shortfall recorded at settlement (SPEC §9.7 step 5) with stock tokens the timelock
+    /// bought using slashed WRITE, and raises `payoutPerOption` for the options of `seriesId` that are still
+    /// unclaimed — up to the unscaled payout the series would have paid without the shortfall, never above it
+    /// (SPEC §14). `tokens` is an upper bound, not an exact amount: only what the raise actually makes
+    /// claimable is pulled, so a slightly oversized OTC fill still executes instead of costing another 48 h
+    /// timelock round trip (D-099).
+    /// @dev The balance and `payoutOwed` rise by the same amount, so `totalAssets()` — and therefore the share
+    /// price — never moves: injected coverage reaches option holders, never depositors. Holders who already
+    /// claimed were paid at the scaled rate and cannot be topped up, so only `filledQty − claimedQty` is
+    /// restored (D-099). Repeat injections are safe and top up whatever is left.
+    function injectCoverage(uint256 seriesId, uint256 tokens) external onlyOwner nonReentrant {
+        VaultSeries storage s = _series[seriesId];
+        if (s.state != SeriesState.SETTLED && s.state != SeriesState.RESOLVED) revert WrongSeriesState(s.state);
+        uint256 rem = s.filledQty - s.claimedQty;
+        if (rem == 0) revert NothingToClaim();
+        uint256 ppoOld = s.payoutPerOption;
+        uint256 ppoFull = _unscaledPayout(s);
+        if (ppoOld >= ppoFull) revert NoShortfall(seriesId);
+
+        uint256 owedNow = Math.mulDiv(rem, ppoOld, WAD);
+        uint256 need = Math.mulDiv(rem, ppoFull, WAD) - owedNow;
+        // `ppoFull < WAD` (K ≥ 1), so `need ≤ rem` and the `budget × WAD` below cannot overflow whatever the
+        // caller passes. The full-restore branch assigns `ppoFull` outright so 100 % is exact, not floored.
+        uint256 budget = tokens < need ? tokens : need;
+        uint256 ppoNew = budget == need ? ppoFull : ppoOld + Math.mulDiv(budget, WAD, rem);
+        // Exactly what the raise makes claimable, which is `≤ budget`: no dust is stranded in `payoutOwed`.
+        uint256 pulled = Math.mulDiv(rem, ppoNew, WAD) - owedNow;
+        if (pulled == 0) revert ZeroAmount();
+
+        s.payoutPerOption = ppoNew.toUint128();
+        payoutOwed += pulled;
+        optionToken.raisePayout(seriesId, ppoNew.toUint128());
+        IERC20(asset()).safeTransferFrom(msg.sender, address(this), pulled);
+        emit CoverageInjected(seriesId, pulled);
+    }
+
     // ═════════════════════════════ views ═════════════════════════════
+
+    /// @notice Stock tokens the timelock must supply to `injectCoverage` to restore `seriesId` to a 100 %
+    /// payout (SPEC §14). Zero when the series is unsettled, took no shortfall, or is fully claimed.
+    function coverageNeeded(uint256 seriesId) external view returns (uint256) {
+        VaultSeries storage s = _series[seriesId];
+        if (s.state != SeriesState.SETTLED && s.state != SeriesState.RESOLVED) return 0;
+        uint256 rem = s.filledQty - s.claimedQty;
+        uint256 ppoFull = _unscaledPayout(s);
+        if (rem == 0 || s.payoutPerOption >= ppoFull) return 0;
+        return Math.mulDiv(rem, ppoFull, WAD) - Math.mulDiv(rem, s.payoutPerOption, WAD);
+    }
 
     function series(uint256 seriesId) external view returns (VaultSeries memory) {
         return _series[seriesId];

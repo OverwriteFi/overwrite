@@ -225,6 +225,90 @@ contract DayInTheLifeTest is TokenBaseTest {
         assertApproxEqRel(sm.stakedOf(staker1) + sm.stakedOf(staker2), sm.totalStaked(), 1e12, "loss shared pro rata");
     }
 
+    /// @dev The shortfall loop end to end (SPEC §14), the one arm of the protocol that only exists once the
+    /// token is live: the issuer destroys collateral, settlement haircuts the option holders pro rata, the
+    /// timelock slashes the safety module, the proceeds buy stock tokens, and `injectCoverage` pays the
+    /// remaining holders at 100 % without touching a single depositor's share price.
+    function test_e2e_slashCoversAShortfall() public {
+        // ═══════════════ 1. the backstop is staked and the vault is funded ═══════════════
+        _stake(staker1, STAKE_1);
+        _stake(staker2, STAKE_2);
+        _enableSafetyModuleCap(10_000);
+        _deposit(alice, DEPOSIT);
+        assertEq(vault.totalAssets(), DEPOSIT, "1 000 stock tokens of collateral");
+
+        // ═══════════════ 2. a week is written and the book clears ═══════════════
+        uint256 id = _openDefault();
+        _bid(mm1, id, 400e18, 3e6);
+        _bid(mm2, id, 300e18, 2e6);
+        _bid(mm3, id, 200e18, 1.5e6);
+        (, uint256 filled,,) = _clear(id);
+        assertEq(filled, 900e18, "the whole book fits inside the offered quantity");
+
+        // ═══════════════ 3. the issuer destroys 90 % of the collateral (THREAT-MODEL T-11.3) ═══════════════
+        vm.prank(admin);
+        stock.burn(address(vault), 900e18);
+        assertEq(vault.totalAssets(), 100e18, "the vault can no longer cover the calls it wrote");
+
+        // ═══════════════ 4. settlement haircuts the option holders, and records why ═══════════════
+        uint256 full = _ppo(255e8, vault.series(id).strike);
+        _settle(id, 255e8); // inside the ±30 % jump guard around sRef = 200
+        uint256 scaled = vault.series(id).payoutPerOption;
+        assertLt(scaled, full, "SPEC 9.7 step 5: the payout is scaled to what is left");
+        assertGt(vault.totalShortfall(), 0, "the shortfall is recorded, not swallowed");
+        // the rescaling floors twice, so a few wei of the accepted dust stay outside `payoutOwed` (SPEC 9.7)
+        assertApproxEqAbs(vault.payoutOwed(), 100e18, 1_000, "every remaining token is reserved for holders");
+        assertLt(vault.totalAssets(), 1_000, "the depositors' NAV is wiped out by the burn");
+
+        // ═══════════════ 5. governance sizes the repair from the vault's own view ═══════════════
+        _refreshWriteOracle();
+        uint256 need = vault.coverageNeeded(id);
+        assertGt(need, 0, "the vault says exactly how many tokens a full restore takes");
+        (uint256 slashAmount, bool ok) = wOracle.writeForUSD(need * PRICE / 1e20);
+        assertTrue(ok, "the WRITE price is available to size the slash");
+        uint256 slashCap = sm.totalStaked() * sm.MAX_SLASH_BPS() / sm.BPS();
+        assertLt(slashAmount, slashCap, "a $10 M backstop covers this loss many times over");
+
+        // ═══════════════ 6. the timelock slashes the safety module ═══════════════
+        uint256 stakedBefore = sm.totalStaked();
+        vm.prank(admin);
+        sm.slash(slashAmount, shortfallReserve, "ipfs://shortfall-evidence");
+        assertEq(write.balanceOf(shortfallReserve), slashAmount, "slashed WRITE is at the timelock's disposal");
+        assertEq(sm.totalStaked(), stakedBefore - slashAmount, "stakers absorb the loss, as designed");
+
+        // ═══════════════ 7. the WRITE is sold and the stock tokens reach the timelock ═══════════════
+        // The conversion is off-chain (Uniswap or OTC) and lands as a second timelock proposal (SPEC §14).
+        address otcDesk = makeAddr("otcDesk");
+        vm.prank(shortfallReserve);
+        write.transfer(otcDesk, slashAmount);
+        vm.prank(admin);
+        stock.mint(admin, need);
+
+        // ═══════════════ 8. injectCoverage closes the loop on chain ═══════════════
+        uint256 assetsBefore = vault.totalAssets();
+        uint256 sharePriceBefore = vault.convertToAssets(1e24);
+        vm.startPrank(admin);
+        stock.approve(address(vault), need);
+        vault.injectCoverage(id, need);
+        vm.stopPrank();
+
+        assertEq(vault.series(id).payoutPerOption, full, "claims are re-enabled at 100 %");
+        assertEq(vault.coverageNeeded(id), 0, "nothing left to cover");
+        assertEq(opt.series(id).payoutPerOption, full, "the OptionToken mirror followed the vault");
+        assertEq(vault.totalAssets(), assetsBefore, "coverage reached option holders, never depositors");
+        assertEq(vault.convertToAssets(1e24), sharePriceBefore, "I-8: the share price did not move");
+        assertLe(vault.payoutOwed(), stock.balanceOf(address(vault)), "I-2: payoutOwed backed again");
+
+        // ═══════════════ 9. the market maker is made whole ═══════════════
+        vm.prank(mm1);
+        ah.claimOptions(id, mm1);
+        uint256 mm1Options = opt.balanceOf(mm1, id);
+        vm.prank(mm1);
+        uint256 paid = opt.claim(id, mm1Options, mm1);
+        assertEq(paid, mm1Options * full / WAD, "paid as if the issuer burn had never happened");
+        assertGt(vault.totalShortfall(), 0, "the historical record of the loss survives the repair");
+    }
+
     // ───────────────────────────── helpers ─────────────────────────────
 
     /// @dev Moves to the next Monday 14:00 UTC with every oracle leg answerable: the stock feed for the

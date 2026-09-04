@@ -76,6 +76,9 @@ contract VaultHandler is Test {
     uint256 public donated;
     uint256 public issuerBurned;
     uint256 public shortfalls;
+    uint256 public injections;
+    uint256 public injected;
+    uint256 public fullRestores;
     uint256 public expiredRequests;
     uint256 public calls;
 
@@ -140,6 +143,18 @@ contract VaultHandler is Test {
         _;
         if (sharePrice() < before) nonSettlePriceDrops++;
         calls++;
+    }
+
+    /// @dev Mirrors `injectCoverage`'s maths in plain arithmetic so the handler can skip a draw the contract
+    /// would reject. `rem` and the payouts are well under 2^128, so nothing here overflows.
+    function _previewInject(uint256 id, uint256 tokens, uint256 need) internal view returns (uint256) {
+        ICoveredCallVault.VaultSeries memory s = vault.series(id);
+        uint256 rem = s.filledQty - s.claimedQty;
+        uint256 owedNow = rem * s.payoutPerOption / WAD;
+        uint256 full = uint256(s.settlementPrice - s.strike) * WAD / s.settlementPrice;
+        uint256 budget = tokens < need ? tokens : need;
+        uint256 ppoNew = budget == need ? full : s.payoutPerOption + budget * WAD / rem;
+        return rem * ppoNew / WAD - owedNow;
     }
 
     function _fund(address who, uint256 amount) internal {
@@ -439,6 +454,32 @@ contract VaultHandler is Test {
         if (vault.sunset()) return;
         vm.prank(admin);
         vault.setSunset();
+    }
+
+    /// @dev The timelock covers a recorded shortfall with stock tokens bought using slashed WRITE (SPEC §14).
+    /// The amount runs up to twice what is needed, so partial injections, exact restores and the overshoot
+    /// clamp are all reachable. Wrapped in `trackPrice`, which asserts the injection never moves the share
+    /// price: coverage belongs to option holders, never to depositors.
+    function injectCoverage(uint256 seed, uint256 tokenSeed) external trackPrice {
+        if (_tokenPaused()) return;
+        if (seriesIds.length == 0) return;
+        uint256 id = seriesIds[seed % seriesIds.length];
+        uint256 need = vault.coverageNeeded(id);
+        if (need == 0) return;
+        uint256 amount = bound(tokenSeed, 1, need * 2);
+        // an amount too small to move the rate by one wei reverts, and `fail_on_revert` is on
+        if (_previewInject(id, amount, need) == 0) return;
+
+        _fund(admin, amount);
+        vm.prank(admin);
+        stock.approve(address(vault), amount);
+        uint256 before = stock.balanceOf(admin);
+        vm.prank(admin);
+        vault.injectCoverage(id, amount);
+
+        injections++;
+        injected += before - stock.balanceOf(admin);
+        if (vault.coverageNeeded(id) == 0) fullRestores++;
     }
 
     function setMaxQueueOps(uint256 a, uint256 b) external trackPrice {

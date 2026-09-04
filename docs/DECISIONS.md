@@ -1386,3 +1386,54 @@ same commit as SPEC §13/§15 or the invariant list, and it had not been touched
 every contract in the layer now satisfies CLAUDE.md rule 2; `AuctionInvariants` deliberately stays out of WRITE
 mode and the migration (D-097), so `WriteFeeBondInvariants` is the only coverage of either. Tests: 605 → 676,
 green under `FOUNDRY_PROFILE=ci`.
+
+---
+
+## D-099 · 2026-09-04 · `injectCoverage` restores only the unclaimed options, from a recomputed unscaled payout
+
+**Decision.** `CoveredCallVault.injectCoverage(seriesId, tokens)` is `onlyOwner` (the timelock, SPEC §15) and
+`nonReentrant`, accepts only a SETTLED or RESOLVED series, and raises `payoutPerOption` toward the payout the
+series would have paid without the §9.7 step 5 scaling. Four sub-decisions:
+
+1. **The unscaled payout is recomputed, not stored.** `ppoFull = (settlementPrice − strike) × 1e18 /
+   settlementPrice`, read back from the series. Both fields are written once at settlement and never mutated,
+   and SPEC §10.2 fixes them as USD per **raw** token with no multiplier adjustment ever applied, so the
+   recomputation is exact for the life of the series — splits and dividends included.
+2. **Only `filledQty − claimedQty` is restored.** Holders who already claimed were paid at the scaled rate.
+3. **`tokens` is an upper bound and the call clamps.** It pulls `min(tokens, what a full restore needs)` and
+   caps the rate at `ppoFull`.
+4. **The `OptionToken` mirror is raised too**, through a new vault-only `raisePayout`.
+
+The vault also exposes `coverageNeeded(seriesId)` so governance can size the purchase on chain.
+
+**Why.** The invariant that makes this safe is per-series `reserve = credited − drawn ≥ floor(rem × ppo /
+1e18)`. It holds with equality at settlement; a claim of `q` preserves it by superadditivity of floor (the
+argument already commented on `payOptionClaim`); and an injection credits exactly `floor(rem × ppoNew / 1e18) −
+floor(rem × ppoOld / 1e18)`, which restores it. Since `payoutOwed = Σ reserve`, it can never underflow, and
+repeat injections are safe. The amount pulled is the claimable increase rather than the budget, so no dust is
+stranded, and the full-restore branch assigns `ppoFull` outright so 100 % is exact rather than floored. Because
+the balance and `payoutOwed` rise by the same amount, `totalAssets()` never moves: coverage reaches option
+holders and cannot leak into depositor NAV or the share price (I-8).
+
+**Alternatives considered.** *Storing the unscaled payout (or a per-series shortfall) on `VaultSeries`*
+— rejected: the struct packs into five slots today and a sixth `uint128` costs a slot per series forever, to
+hold a value that is already derivable exactly. *Reverting on overshoot* — rejected: the call executes after a
+48 h delay, so a slightly oversized OTC fill would cost another 48 h; the event records what was actually
+pulled, and the 100 % cap is enforced either way. *Topping up holders who already claimed* — rejected: there
+is no per-holder claimed ledger, only the aggregate `claimedQty`, and adding one would mean per-holder storage
+on every claim to serve an event that should be rare. Early claimers taking the haircut is the documented
+consequence, not an oversight. *Leaving the `OptionToken` mirror stale* — rejected: `claim` prices from the
+vault so no money was at risk, but SPEC §16.1 publishes that copy to indexers and the frontend, and it would
+have shown the scaled rate forever (`markSettled` is one-shot).
+
+**Consequences.** `test_injectCoverage_*` (nine unit tests) pin the semantics, including
+`_onlyUnclaimedAreRestored` and `_clampsOvershoot`; `testFuzz_injectCoverageNeverExceedsUnscaled` and
+`testFuzz_injectCoverageClaimsNeverUnderflow` check the maths against a plain-arithmetic reference;
+`invariant_I2_coverageBackedAndBounded` asserts `payoutOwed ≤ balance`, the `ppoFull` ceiling and
+vault/mirror agreement across the stateful run, with `test_handlerReachesShortfallAndInjection` proving the
+path is not vacuous (a random walk has to burn through half the collateral first). `test_T11_injectCoverage
+RestoresFullPayout` and `test_e2e_slashCoversAShortfall` close the loop THREAT-MODEL T-11.3 and SPEC §14
+describe. Vault size 19,542 → 20,778 bytes (3,798 headroom). Tests: 676 → 692, green under
+`FOUNDRY_PROFILE=ci`. `CoveredCallVault` still does not override `renounceOwnership` while eight sibling
+contracts do; a renounce would now brick the shortfall-repair path, so that override is the next hardening
+item.

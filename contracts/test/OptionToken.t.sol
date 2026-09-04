@@ -139,6 +139,31 @@ contract OptionTokenTest is BaseTest {
         opt.markSettled(id, 1, 1);
     }
 
+    /// @dev The mirror can only be raised, only by the series' vault, and only after settlement (SPEC §14).
+    function test_raisePayout_onlyVaultSettledAndMonotonic() public {
+        uint256 id = _createFake();
+        vm.expectRevert(abi.encodeWithSelector(OptionToken.NotSettled.selector, id));
+        vm.prank(fakeVault);
+        opt.raisePayout(id, 1e17);
+
+        vm.prank(fakeVault);
+        opt.markSettled(id, 220e8, 1e17);
+
+        vm.expectRevert(OptionToken.NotVault.selector);
+        vm.prank(alice);
+        opt.raisePayout(id, 2e17);
+        // never sideways or down: the vault only ever restores toward the unscaled payout
+        vm.expectRevert(abi.encodeWithSelector(OptionToken.PayoutNotRaised.selector, id));
+        vm.prank(fakeVault);
+        opt.raisePayout(id, 1e17);
+
+        vm.expectEmit(true, false, false, true);
+        emit OptionToken.PayoutRaised(id, 2e17);
+        vm.prank(fakeVault);
+        opt.raisePayout(id, 2e17);
+        assertEq(opt.series(id).payoutPerOption, 2e17);
+    }
+
     // ───────────────────────────── claim ─────────────────────────────
 
     function test_claim_revertsBeforeSettlement() public {

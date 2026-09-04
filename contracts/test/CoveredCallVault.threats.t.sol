@@ -137,6 +137,32 @@ contract CoveredCallVaultThreatsTest is BaseTest {
         vault.mintSeries(id, offered, 0);
     }
 
+    /// @dev The full T-11 loss path and its repair: an issuer burn haircuts the option holders at settlement,
+    /// then the safety module's proceeds are injected and the survivors are paid at 100 % (SPEC §9.7 step 5, §14).
+    function test_T11_injectCoverageRestoresFullPayout() public {
+        _deposit(alice, 100e18);
+        (uint256 id, uint256 filled) = _openAndClear(200e8, 0);
+        _mintOptions(id, mm, filled);
+        vm.prank(admin);
+        stock.burn(address(vault), 90e18); // issuer destroys 90 % of the collateral
+        _settle(id, 400e8, 1);
+        assertEq(vault.totalShortfall(), 40e18, "the shortfall is recorded, not swallowed");
+        assertEq(vault.series(id).payoutPerOption, 0.1e18, "holders are haircut to 20 % of the true payout");
+
+        uint256 need = vault.coverageNeeded(id);
+        vm.startPrank(admin);
+        stock.mint(admin, need); // proceeds of SafetyModule.slash, converted off-chain (SPEC §14)
+        stock.approve(address(vault), need);
+        vault.injectCoverage(id, need);
+        vm.stopPrank();
+
+        assertEq(vault.series(id).payoutPerOption, 0.5e18, "claims re-enabled at 100 %");
+        assertLe(vault.payoutOwed(), stock.balanceOf(address(vault)), "I-2: payoutOwed backed again");
+        vm.prank(mm);
+        assertEq(opt.claim(id, filled, mm), 50e18, "the holder is made whole");
+        assertEq(vault.totalShortfall(), 40e18, "the historical record of the loss is not erased");
+    }
+
     // ───────────────────────────── T-12: settlement must not depend on an external oracle ─────────────────────────────
 
     function test_T12_settleSurvivesRevertingPriceSource() public {

@@ -901,6 +901,176 @@ contract CoveredCallVaultTest is BaseTest {
         assertEq(vault.freeAssets(), 0);
     }
 
+    // ═════════════════════════════ injectCoverage (SPEC §14) ═════════════════════════════
+
+    /// @dev The only reachable shortfall: the issuer burns 90 % of NAV between the clear and settlement, so
+    /// S = 400 against K = 200 pays 0.1 per option instead of the unscaled 0.5 (SPEC §9.7 step 5).
+    function _shortfallSeries() internal returns (uint256 id, uint256 filled) {
+        _deposit(alice, 100e18);
+        (id, filled) = _openAndClear(200e8, 0);
+        _mintOptions(id, mm, filled);
+        vm.prank(admin);
+        stock.burn(address(vault), 90e18); // issuer action (SPEC §2)
+        _settle(id, 400e8, 1);
+    }
+
+    /// @dev Governance converted slashed WRITE into stock tokens; they land at the timelock (SPEC §14).
+    function _fundTimelock(uint256 amount) internal {
+        vm.startPrank(admin);
+        stock.mint(admin, amount);
+        stock.approve(address(vault), amount);
+        vm.stopPrank();
+    }
+
+    function test_injectCoverage_restoresFullPayout() public {
+        (uint256 id, uint256 filled) = _shortfallSeries();
+        uint256 need = vault.coverageNeeded(id);
+        assertEq(need, 40e18, "40 tokens short of a 100 % payout");
+        _fundTimelock(need);
+
+        vm.expectEmit(true, false, false, true);
+        emit CoveredCallVault.CoverageInjected(id, need);
+        vm.prank(admin);
+        vault.injectCoverage(id, need);
+
+        assertEq(vault.series(id).payoutPerOption, _ppo(400e8, 200e8), "back to the unscaled payout");
+        assertEq(vault.coverageNeeded(id), 0, "nothing left to cover");
+        assertEq(vault.payoutOwed(), 50e18, "the full payout is reserved");
+        assertLe(vault.payoutOwed(), stock.balanceOf(address(vault)), "I-2: payoutOwed backed");
+
+        vm.prank(mm);
+        uint256 got = opt.claim(id, filled, mm);
+        assertEq(got, 50e18, "the holder is paid at 100 %");
+        assertEq(vault.payoutOwed(), 0);
+    }
+
+    /// @dev A 48 h delay makes a revert expensive, so an oversized OTC fill clamps instead (D-099).
+    function test_injectCoverage_clampsOvershoot() public {
+        (uint256 id,) = _shortfallSeries();
+        uint256 need = vault.coverageNeeded(id);
+        _fundTimelock(need * 10);
+        uint256 balBefore = stock.balanceOf(admin);
+
+        vm.prank(admin);
+        vault.injectCoverage(id, need * 10);
+
+        assertEq(balBefore - stock.balanceOf(admin), need, "only what was needed is pulled");
+        assertEq(vault.series(id).payoutPerOption, _ppo(400e8, 200e8), "capped at the unscaled payout");
+        assertEq(vault.coverageNeeded(id), 0);
+    }
+
+    function test_injectCoverage_partialThenFull() public {
+        (uint256 id, uint256 filled) = _shortfallSeries();
+        uint256 need = vault.coverageNeeded(id);
+        _fundTimelock(need);
+
+        vm.prank(admin);
+        vault.injectCoverage(id, need / 4);
+        uint256 mid = vault.series(id).payoutPerOption;
+        assertGt(mid, 0.1e18, "the rate moved up");
+        assertLt(mid, _ppo(400e8, 200e8), "but not all the way");
+        assertEq(vault.coverageNeeded(id), need - need / 4, "the remainder is still owed");
+
+        uint256 rest = vault.coverageNeeded(id); // read outside the prank
+        vm.prank(admin);
+        vault.injectCoverage(id, rest);
+
+        assertEq(vault.series(id).payoutPerOption, _ppo(400e8, 200e8), "the second tranche closes it");
+        vm.prank(mm);
+        assertEq(opt.claim(id, filled, mm), 50e18, "paid at 100 % after two tranches");
+        assertEq(vault.payoutOwed(), 0, "no dust stranded across two injections");
+    }
+
+    /// @dev Holders who already claimed took the haircut and cannot be topped up: only `filledQty −
+    /// claimedQty` is restored (D-099).
+    function test_injectCoverage_onlyUnclaimedAreRestored() public {
+        (uint256 id, uint256 filled) = _shortfallSeries();
+        vm.prank(mm);
+        assertEq(opt.claim(id, filled / 2, mm), 5e18, "the early claimer took the haircut");
+
+        uint256 need = vault.coverageNeeded(id);
+        assertEq(need, 20e18, "only the unclaimed half is restored");
+        _fundTimelock(need);
+        vm.prank(admin);
+        vault.injectCoverage(id, need);
+
+        vm.prank(mm);
+        assertEq(opt.claim(id, filled / 2, mm), 25e18, "the remaining half is paid at 100 %");
+        assertEq(vault.payoutOwed(), 0, "nothing stranded; the early haircut is not refunded");
+    }
+
+    function test_injectCoverage_leavesSharePriceUnchanged() public {
+        (uint256 id,) = _shortfallSeries();
+        uint256 need = vault.coverageNeeded(id);
+        _fundTimelock(need);
+        uint256 priceBefore = _sharePrice();
+        uint256 assetsBefore = vault.totalAssets();
+
+        vm.prank(admin);
+        vault.injectCoverage(id, need);
+
+        assertEq(_sharePrice(), priceBefore, "coverage reaches option holders, never depositors");
+        assertEq(vault.totalAssets(), assetsBefore, "NAV is untouched");
+    }
+
+    function test_injectCoverage_updatesOptionTokenMirror() public {
+        (uint256 id,) = _shortfallSeries();
+        assertEq(opt.series(id).payoutPerOption, 0.1e18, "the mirror starts at the scaled rate");
+        uint256 need = vault.coverageNeeded(id);
+        _fundTimelock(need);
+
+        vm.prank(admin);
+        vault.injectCoverage(id, need);
+
+        assertEq(opt.series(id).payoutPerOption, vault.series(id).payoutPerOption, "the mirror follows the vault");
+        assertEq(opt.series(id).payoutPerOption, _ppo(400e8, 200e8));
+    }
+
+    function test_injectCoverage_onlyOwner() public {
+        (uint256 id,) = _shortfallSeries();
+        vm.prank(alice);
+        vm.expectRevert(abi.encodeWithSelector(Ownable.OwnableUnauthorizedAccount.selector, alice));
+        vault.injectCoverage(id, 1e18);
+    }
+
+    function test_injectCoverage_revertsWithoutShortfall() public {
+        _deposit(alice, 100e18);
+        (uint256 id,) = _openAndClear(K, 0);
+        _settle(id, 400e8, 1); // fully covered: ppo is already the unscaled value
+        vm.prank(admin);
+        vm.expectRevert(abi.encodeWithSelector(CoveredCallVault.NoShortfall.selector, id));
+        vault.injectCoverage(id, 1e18);
+    }
+
+    function test_injectCoverage_reverts() public {
+        _deposit(alice, 100e18);
+        (uint256 id, uint256 filled) = _openAndClear(200e8, 0);
+        _mintOptions(id, mm, filled);
+        vm.prank(admin);
+        vm.expectRevert(abi.encodeWithSelector(CoveredCallVault.WrongSeriesState.selector, SeriesState.LIVE));
+        vault.injectCoverage(id, 1e18);
+
+        vm.prank(admin);
+        stock.burn(address(vault), 90e18);
+        _settle(id, 400e8, 1);
+
+        vm.startPrank(admin);
+        vm.expectRevert(CoveredCallVault.ZeroAmount.selector);
+        vault.injectCoverage(id, 0);
+        // one wei cannot move the rate across 100e18 unclaimed options, so nothing is pulled
+        vm.expectRevert(CoveredCallVault.ZeroAmount.selector);
+        vault.injectCoverage(id, 1);
+        vm.stopPrank();
+
+        uint256 need = vault.coverageNeeded(id);
+        _fundTimelock(need);
+        vm.prank(mm);
+        opt.claim(id, filled, mm);
+        vm.prank(admin);
+        vm.expectRevert(CoveredCallVault.NothingToClaim.selector);
+        vault.injectCoverage(id, need);
+    }
+
     // ═════════════════════════════ payOptionClaim ═════════════════════════════
 
     function test_payOptionClaim_onlyOptionTokenAndState() public {

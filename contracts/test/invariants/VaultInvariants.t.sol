@@ -51,6 +51,23 @@ contract VaultInvariants is BaseTest {
         assertLe(vault.payoutOwed(), bal, "I-2: payoutOwed backed");
     }
 
+    /// SPEC §14: coverage restores option holders and nobody else. An injection never raises the payout past
+    /// the value the series would have paid without the shortfall, `payoutOwed` stays backed by the balance
+    /// after every injection, and the OptionToken mirror never drifts from the vault's authoritative rate.
+    function invariant_I2_coverageBackedAndBounded() public view {
+        for (uint256 i; i < h.seriesCount(); ++i) {
+            uint256 id = h.seriesIds(i);
+            ICoveredCallVault.VaultSeries memory s = vault.series(id);
+            if (s.state != SeriesState.SETTLED && s.state != SeriesState.RESOLVED) continue;
+            uint256 full =
+                s.settlementPrice > s.strike ? uint256(s.settlementPrice - s.strike) * 1e18 / s.settlementPrice : 0;
+            assertLe(s.payoutPerOption, full, "coverage never pays above the unscaled payout");
+            assertLt(s.payoutPerOption, 1e18, "I-2: payoutPerOption < 1e18");
+            assertEq(opt.series(id).payoutPerOption, s.payoutPerOption, "the OptionToken mirror tracks the vault");
+        }
+        assertLe(vault.payoutOwed(), stock.balanceOf(address(vault)), "I-2: payoutOwed backed after injection");
+    }
+
     /// I3: after settlement no series remains encumbered; IDLE means zero encumbrance.
     function invariant_I3_noEncumbranceAfterSettlement() public view {
         uint256 expected;
@@ -113,5 +130,30 @@ contract VaultInvariants is BaseTest {
             address a = h.actors(i);
             assertEq(vault.maxRedeem(a), vault.balanceOf(a), "I-15: IDLE => all shares redeemable");
         }
+    }
+
+    /// @dev Deterministic proof the handler is not vacuous on the shortfall path: a random walk has to burn
+    /// through more than half the collateral between the clear and settlement before an injection is even
+    /// possible, so the two ghosts the coverage invariant leans on are driven explicitly here.
+    function test_handlerReachesShortfallAndInjection() public {
+        h.deposit(0, 100e18);
+        h.openSeries(200e8, 1 days, 0);
+        h.mintSeries(type(uint256).max, 0); // fill the whole offered quantity
+        h.mintOptions(0, type(uint256).max);
+        // the issuer burns 10 % of NAV per call; ten of them put the payout above what is left
+        for (uint256 i; i < 10; ++i) {
+            h.issuerBurn(type(uint256).max);
+        }
+        h.settle(400e8, 1); // S = 2K → the unscaled payout is 0.5, well above the remaining collateral
+        assertGt(h.shortfalls(), 0, "the burn produced a recorded shortfall");
+
+        h.injectCoverage(0, type(uint256).max);
+        assertGt(h.injections(), 0, "coverage was injected");
+        assertGt(h.injected(), 0, "and tokens actually moved");
+        assertGt(h.fullRestores(), 0, "an over-sized injection clamps to a full restore");
+        assertEq(h.nonSettlePriceDrops(), 0, "I-8: the injection did not move the share price");
+
+        invariant_I2_coverageBackedAndBounded();
+        invariant_I2_claimsBacked();
     }
 }

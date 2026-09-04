@@ -28,5 +28,6 @@ interface IOptionToken {
     function mint(uint256 id, address to, uint256 qty) external;
     function burn(uint256 id, address from, uint256 qty) external;
     function markSettled(uint256 id, uint128 settlementPrice, uint128 payoutPerOption) external;
+    function raisePayout(uint256 id, uint128 payoutPerOption) external;
     function claim(uint256 id, uint256 qty, address to) external returns (uint256 tokens);
 }
