@@ -1437,3 +1437,43 @@ describe. Vault size 19,542 → 20,778 bytes (3,798 headroom). Tests: 676 → 69
 `FOUNDRY_PROFILE=ci`. `CoveredCallVault` was also the last owned contract without a `renounceOwnership`
 override; since a renounce would now brick the shortfall-repair path (and `setSunset`, the D-034 migration
 route) it reverts `RenounceDisabled` like its eight siblings, pinned by `test_renounceOwnershipDisabled`.
+
+---
+
+## D-100 · 2026-09-05 · `renounceOwnership` is disabled on the last three owned contracts
+
+**Decision.** `AuctionHouse`, `CapController` and `OptionToken` now carry the same override the other eleven
+owned contracts already had: `function renounceOwnership() public view override onlyOwner { revert
+RenounceDisabled(); }`, each with its own `error RenounceDisabled()`. All fourteen owned contracts are now
+consistent, and `contracts/README.md` no longer overstates the guarantee.
+
+**Why.** The claim in `contracts/README.md` that `renounceOwnership` reverts on *every* owned contract was
+false: three contracts never got the override, and the D-099 note itself miscounted the siblings. The gap
+was found while writing the deploy layer, which asserts ownership across the whole system. Each of the three
+guards a path that has no other route once the owner is gone, and in every case the timelock is the owner, so
+a renounce is a governance transaction that cannot be undone by anyone:
+
+- **AuctionHouse** — no account holds `DEFAULT_ADMIN_ROLE` (the owner *is* the admin, D-028), so an ownerless
+  AuctionHouse can never `registerVault` another vault, can never revoke a compromised keeper through
+  `setKeeper`, and can never `setPriceSource` for the OQ-005 switch. `KEEPER_ROLE` would be frozen with a hot
+  key holding it permanently — strictly worse than the rogue-keeper case SPEC §15 already plans for.
+- **CapController** — `capUSD` freezes at its current value for every vault forever and the FIXED
+  → SAFETY_MODULE switch that CLAUDE.md rule 6 requires to exist from day one becomes unreachable.
+- **OptionToken** — `registerVault` is the only way a vault is ever added, and it is `onlyOwner`.
+
+**Alternatives considered.** *Leave it, since the timelock would have to renounce itself* — rejected: that
+argument applies equally to the eleven contracts that do guard against it, so the asymmetry is the bug, not
+the guard. The D-098 review's own standard is that a recovery path must not be droppable by a single
+governance mistake, and a 48 h delay is no protection against a batch nobody reads closely. *Report it from
+the deploy verification instead of fixing it* — rejected as a half-measure, but the report is kept anyway
+(see below). *Also disable `AccessControl.renounceRole`* — rejected: a guardian or keeper renouncing its own
+role is a legitimate rotation step, it costs the protocol nothing, and the timelock can re-grant.
+
+**Consequences.** `test_renounceOwnershipDisabled` added to `test/AuctionHouse.t.sol`,
+`test/CapController.t.sol` and `test/OptionToken.t.sol`, each in the established shape: the owner gets
+`RenounceDisabled`, a non-owner is stopped by `onlyOwner` with `OwnableUnauthorizedAccount` first, and
+`owner()` is unchanged afterwards. Tests: 693 → 696, green. Sizes: +16 bytes each — AuctionHouse
+23,085 → 23,101 (1,475 headroom, the tightest in the codebase), OptionToken 8,674 → 8,690, CapController
+3,506 → 3,522. The deploy layer's `DeployChecks` keeps a WARN sweep that `staticcall`s `renounceOwnership()`
+on every owned contract and lists any that do not revert; with all fourteen protected it prints nothing, so it
+stands as a regression detector for the day a fifteenth owned contract is added without the override.

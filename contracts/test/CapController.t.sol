@@ -20,6 +20,20 @@ contract CapControllerTest is BaseTest {
         new CapController(admin, address(0));
     }
 
+    /// @dev Matches the other thirteen owned contracts (D-100). An ownerless CapController would freeze
+    /// `capUSD` for every vault forever and make the FIXED -> SAFETY_MODULE switch of CLAUDE.md rule 6
+    /// unreachable.
+    function test_renounceOwnershipDisabled() public {
+        vm.prank(admin);
+        vm.expectRevert(CapController.RenounceDisabled.selector);
+        cap.renounceOwnership();
+        // a non-owner is still rejected by `onlyOwner` first, so ownership cannot be dropped by anyone
+        vm.prank(alice);
+        vm.expectRevert(abi.encodeWithSelector(Ownable.OwnableUnauthorizedAccount.selector, alice));
+        cap.renounceOwnership();
+        assertEq(cap.owner(), admin, "the timelock still owns the cap controller");
+    }
+
     // ───────────────────────────── FIXED ─────────────────────────────
 
     function test_fixed_remainingMath() public view {

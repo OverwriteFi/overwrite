@@ -1022,6 +1022,20 @@ contract AuctionHouseTest is AuctionBaseTest {
         assertEq(sun, fri + 2 days + 3 hours + 59 minutes, "Sunday 23:59:00 UTC");
     }
 
+    /// @dev Matches the other thirteen owned contracts (D-100). No account holds `DEFAULT_ADMIN_ROLE`, so an
+    /// ownerless AuctionHouse could never register a vault, revoke a compromised keeper through `setKeeper`,
+    /// or re-point `setPriceSource`.
+    function test_renounceOwnershipDisabled() public {
+        vm.prank(admin);
+        vm.expectRevert(AuctionHouse.RenounceDisabled.selector);
+        ah.renounceOwnership();
+        // a non-owner is still rejected by `onlyOwner` first, so ownership cannot be dropped by anyone
+        vm.prank(alice);
+        vm.expectRevert(abi.encodeWithSelector(Ownable.OwnableUnauthorizedAccount.selector, alice));
+        ah.renounceOwnership();
+        assertEq(ah.owner(), admin, "the timelock still owns the auction house");
+    }
+
     // ───────────────────────────── end to end ─────────────────────────────
 
     function test_e2e_weekCycle() public {

@@ -37,6 +37,19 @@ contract OptionTokenTest is BaseTest {
         opt.registerVault(makeAddr("x"), makeAddr("y"));
     }
 
+    /// @dev Matches the other thirteen owned contracts (D-100). `registerVault` is the only way a vault is
+    /// ever added, so an ownerless OptionToken could never serve another underlying.
+    function test_renounceOwnershipDisabled() public {
+        vm.prank(admin);
+        vm.expectRevert(OptionToken.RenounceDisabled.selector);
+        opt.renounceOwnership();
+        // a non-owner is still rejected by `onlyOwner` first, so ownership cannot be dropped by anyone
+        vm.prank(alice);
+        vm.expectRevert(abi.encodeWithSelector(Ownable.OwnableUnauthorizedAccount.selector, alice));
+        opt.renounceOwnership();
+        assertEq(opt.owner(), admin, "the timelock still owns the option token");
+    }
+
     function test_registerVault_revertsOnDuplicateUnderlying() public {
         vm.expectRevert(abi.encodeWithSelector(OptionToken.VaultAlreadyRegistered.selector, address(stock)));
         vm.prank(admin);

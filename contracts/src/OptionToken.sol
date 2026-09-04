@@ -28,6 +28,7 @@ contract OptionToken is ERC1155Supply, Ownable2Step, IOptionToken {
     error NotSettled(uint256 id);
     error ZeroQty();
     error PayoutNotRaised(uint256 id);
+    error RenounceDisabled();
 
     event VaultRegistered(address indexed underlying, address indexed vault);
     event SeriesCreated(
@@ -56,6 +57,12 @@ contract OptionToken is ERC1155Supply, Ownable2Step, IOptionToken {
         vaultOf[underlying] = vault;
         isVault[vault] = true;
         emit VaultRegistered(underlying, vault);
+    }
+
+    /// @notice Disabled: the owner is the timelock and `registerVault` is the only way a vault is ever
+    /// added (CLAUDE.md rule 5). An ownerless OptionToken could never serve another underlying.
+    function renounceOwnership() public view override onlyOwner {
+        revert RenounceDisabled();
     }
 
     // ───────────────────────────── vault-only ─────────────────────────────

@@ -132,6 +132,7 @@ contract AuctionHouse is IAuctionHouse, Ownable2Step, AccessControl, ReentrancyG
     error Miswired(bytes32 what);
     error WrongOptionToken(address vault, address optionToken);
     error SeriesIdInUse(uint256 seriesId);
+    error RenounceDisabled();
 
     // ───────────────────────────── events (SPEC §16.1) ─────────────────────────────
 
@@ -723,6 +724,13 @@ contract AuctionHouse is IAuctionHouse, Ownable2Step, AccessControl, ReentrancyG
         if (account == address(0)) revert ZeroAddress();
         if (enabled) _grantRole(KEEPER_ROLE, account);
         else _revokeRole(KEEPER_ROLE, account);
+    }
+
+    /// @notice Disabled: the owner is the timelock and it is the only admin this contract has (CLAUDE.md
+    /// rule 5). No account holds `DEFAULT_ADMIN_ROLE`, so an ownerless AuctionHouse could never register a
+    /// vault, revoke a compromised keeper through `setKeeper`, or re-point `setPriceSource` for OQ-005.
+    function renounceOwnership() public view override onlyOwner {
+        revert RenounceDisabled();
     }
 
     // ═════════════════════════════ views (SPEC §16.2) ═════════════════════════════

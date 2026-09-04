@@ -36,6 +36,7 @@ contract CapController is Ownable2Step, ICapController {
     error OutOfBounds();
     error SafetyModuleNotSet();
     error WeightsExceedTotal();
+    error RenounceDisabled();
 
     event ParameterChanged(address indexed target, bytes32 key, uint256 oldValue, uint256 newValue);
 
@@ -86,6 +87,13 @@ contract CapController is Ownable2Step, ICapController {
         totalWeightBps = newTotal;
         capWeightBps[vault] = bps;
         emit ParameterChanged(vault, "capWeightBps", old, bps);
+    }
+
+    /// @notice Disabled: the owner is the timelock and every cap lever runs through it (CLAUDE.md rule 5).
+    /// An ownerless CapController would freeze `capUSD` at its current value for every vault forever and
+    /// would make the FIXED -> SAFETY_MODULE switch of CLAUDE.md rule 6 unreachable.
+    function renounceOwnership() public view override onlyOwner {
+        revert RenounceDisabled();
     }
 
     // ───────────────────────────── views ─────────────────────────────
