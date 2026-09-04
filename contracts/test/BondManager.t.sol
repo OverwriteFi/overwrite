@@ -135,7 +135,7 @@ contract BondManagerTest is Test {
         _post();
         uint64 expected = uint64(block.timestamp + 7 days);
         vm.expectEmit(true, false, false, true);
-        emit BondManager.BondWithdrawRequested(mm, MM, expected);
+        emit BondManager.BondWithdrawRequested(mm, MM, address(usdg), expected);
         vm.prank(mm);
         uint64 unlockAt = bm.requestWithdraw(MM);
         assertEq(unlockAt, expected);
@@ -216,7 +216,7 @@ contract BondManagerTest is Test {
         bm.unlock(mm, 1);
         uint256 before = usdg.balanceOf(mm);
         vm.expectEmit(true, false, false, true);
-        emit BondManager.BondWithdrawn(mm, MM, MM_BOND);
+        emit BondManager.BondWithdrawn(mm, MM, address(usdg), MM_BOND);
         vm.prank(mm);
         uint256 amount = bm.withdrawBond(MM);
         assertEq(amount, MM_BOND);
@@ -271,7 +271,7 @@ contract BondManagerTest is Test {
         bm.slashBond(mm, MM, MM_BOND + 1, "uri");
 
         vm.expectEmit(true, false, false, true);
-        emit BondManager.BondSlashed(mm, MM, 5_000e6, "ipfs://evidence");
+        emit BondManager.BondSlashed(mm, MM, address(usdg), 5_000e6, "ipfs://evidence");
         vm.prank(admin);
         bm.slashBond(mm, MM, 5_000e6, "ipfs://evidence");
         assertEq(usdg.balanceOf(treasury), 5_000e6);

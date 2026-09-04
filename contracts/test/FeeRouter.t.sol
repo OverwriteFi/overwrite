@@ -39,7 +39,8 @@ contract FeeRouterTest is Test {
         assertEq(fr.DEFAULT_FEE_BPS(), 1000);
         assertEq(fr.MAX_FEE_BPS(), 2000);
         assertEq(fr.treasury(), treasury);
-        assertEq(fr.writePool(), address(0));
+        assertEq(fr.writeToken(), address(0));
+        assertEq(fr.priceOracle(), address(0));
         vm.expectRevert(FeeRouter.ZeroAddress.selector);
         new FeeRouter(address(0), admin, treasury);
         vm.expectRevert(FeeRouter.ZeroAddress.selector);

@@ -4,17 +4,29 @@ pragma solidity 0.8.26;
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 import {ReentrancyGuard} from "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
+import {Math} from "@openzeppelin/contracts/utils/math/Math.sol";
 import {Ownable} from "@openzeppelin/contracts/access/Ownable.sol";
 import {Ownable2Step} from "@openzeppelin/contracts/access/Ownable2Step.sol";
 
+import {IERC20Burnable} from "./interfaces/IERC20Burnable.sol";
 import {IFeeRouter} from "./interfaces/IFeeRouter.sol";
+import {IWritePriceOracle} from "./interfaces/IWritePriceOracle.sol";
 
 /// @title FeeRouter
 /// @notice Performance fee on premium (SPEC §11): `feeBps` per vault (default 10 %, bound [0, 20 %]), booked
-/// by `collect` at clearing and forwarded to `treasury` by the permissionless `flush` (D-023). The WRITE mode
-/// (D-011, D-016) is gated behind `writePool`, which stays `address(0)` until the token launches; every
-/// WRITE entry point reverts `WriteNotLaunched` until then.
-/// @dev `auctionHouse` is set once after deployment (D-044).
+/// by `collect` at clearing and settled by the permissionless `flush` (D-023). In USDG mode the fee goes to
+/// `treasury`. In WRITE mode (D-011) the router instead debits the curator's prefunded WRITE at a 20 %
+/// discount, burns half of it, sends the rest to `treasury`, and rebates the USDG fee to the curator.
+/// There is no distribution to token holders anywhere in this contract (CLAUDE.md rule 7).
+/// @dev `collect` is pure bookkeeping and is deliberately left byte-for-byte as it was: the entire WRITE path
+/// runs inside `flush` (D-085), so `AuctionHouse.clear` — which is permissionless and must never brick —
+/// cannot be affected by an oracle, a burn or a transfer. A debit at collect time, even inside a try/catch,
+/// would expose `clear` to a gas-bomb oracle via EIP-150's 63/64 rule.
+/// Every WRITE-path failure degrades to the USDG path and emits `WriteModeFallback` with a reason, so "why
+/// did WRITE mode not fire" is answerable from chain data alone.
+/// `writePool` was removed (D-084, superseding D-016): a pool address this contract never reads was dead
+/// state and a second, unverifiable place to point at a pool. The launch gate is now `writeToken` plus
+/// `priceOracle`. `auctionHouse` is set once after deployment (D-044).
 contract FeeRouter is IFeeRouter, Ownable2Step, ReentrancyGuard {
     using SafeERC20 for IERC20;
 
@@ -22,6 +34,8 @@ contract FeeRouter is IFeeRouter, Ownable2Step, ReentrancyGuard {
 
     uint16 public constant DEFAULT_FEE_BPS = 1000; // SPEC §11
     uint16 public constant MAX_FEE_BPS = 2000;
+    uint16 public constant MAX_DISCOUNT_BPS = 5000;
+    uint16 public constant MAX_BURN_SHARE_BPS = 10_000;
     uint256 public constant BPS = 1e4;
     IERC20 public immutable usdg;
 
@@ -29,31 +43,53 @@ contract FeeRouter is IFeeRouter, Ownable2Step, ReentrancyGuard {
 
     address public auctionHouse;
     address public treasury;
-    /// @notice WRITE/USDG pool for the WRITE fee mode; placeholder `address(0)` until launch (D-016).
-    address public writePool;
+    /// @notice Set once post-launch; while zero the WRITE mode is unreachable (the D-016 intent).
+    address public writeToken;
+    /// @notice Re-settable, like `SafetyModule.oracle` (D-039 precedent).
+    address public priceOracle;
+    uint16 public writeDiscountBps = 2000; // D-011: 20 % discount
+    uint16 public writeBurnShareBps = 5000; // D-011: 50 % of the WRITE fee is burned
 
     mapping(address vault => uint16) internal _feeBps;
     mapping(address vault => bool) public initialised;
     mapping(address vault => uint256) public pending;
     mapping(address vault => FeeMode) internal _mode;
+    mapping(address vault => address) public curatorOf;
+    mapping(address vault => uint256) internal _writeBalance;
 
     // ───────────────────────────── errors ─────────────────────────────
 
     error ZeroAddress();
+    error ZeroAmount();
     error NotAuctionHouse();
+    error NotCurator();
     error AlreadySet();
     error NotInitialised(address vault);
     error OutOfBounds();
     error NothingToFlush();
     error WriteNotLaunched();
+    error InsufficientWriteBalance(uint256 have, uint256 want);
+    error Miswired(bytes32 what);
 
     // ───────────────────────────── events (SPEC §16.1) ─────────────────────────────
 
     event FeeCollected(address indexed vault, uint256 indexed seriesId, uint256 usdg, FeeMode mode);
-    event FeeFlushed(address indexed vault, address indexed treasury, uint256 usdg);
-    event WriteModeFallback(address indexed vault);
+    event FeeFlushed(address indexed vault, address indexed to, uint256 usdg);
+    /// @dev `price8` is what makes flush-time pricing auditable on-chain (D-089).
+    event WriteFeePaid(
+        address indexed vault,
+        address indexed curator,
+        uint256 feeUSDG,
+        uint256 writeAmount,
+        uint256 burned,
+        uint256 price8
+    );
+    event WriteModeFallback(address indexed vault, bytes32 reason);
+    event WriteDeposited(address indexed vault, address indexed from, uint256 amount);
+    event WriteWithdrawn(address indexed vault, address indexed to, uint256 amount);
     event VaultInitialised(address indexed vault, uint16 feeBps);
     event AuctionHouseSet(address indexed auctionHouse);
+    event WriteTokenSet(address indexed writeToken);
     event ParameterChanged(address indexed target, bytes32 key, uint256 oldValue, uint256 newValue);
 
     // ───────────────────────────── constructor ─────────────────────────────
@@ -83,7 +119,8 @@ contract FeeRouter is IFeeRouter, Ownable2Step, ReentrancyGuard {
 
     /// @inheritdoc IFeeRouter
     /// @dev Pure bookkeeping: the USDG stays in the AuctionHouse, which holds a standing approval for this
-    /// contract; `flush` pulls it. No transfer happens here, so nothing fee-side can revert `clear` (D-023, D-049).
+    /// contract; `flush` pulls it. No transfer happens here, so nothing fee-side can revert `clear` (D-023,
+    /// D-049, D-085) — this is why the WRITE path lives in `flush` and not here.
     function collect(address vault, uint256 seriesId, uint256 amount) external onlyAuctionHouse {
         pending[vault] += amount;
         emit FeeCollected(vault, seriesId, amount, _mode[vault]);
@@ -92,14 +129,56 @@ contract FeeRouter is IFeeRouter, Ownable2Step, ReentrancyGuard {
     // ═════════════════════════════ permissionless ═════════════════════════════
 
     /// @inheritdoc IFeeRouter
-    /// @dev USDG mode only until the token launches: pulls the pending balance from the AuctionHouse straight
-    /// to `treasury`. A frozen treasury (or a frozen AuctionHouse) makes only this call revert.
+    /// @dev USDG mode: pulls the pending balance from the AuctionHouse straight to `treasury`. WRITE mode:
+    /// debits the curator's prefunded WRITE, burns the burn share, sends the rest to `treasury`, and rebates
+    /// the USDG to the curator. Any WRITE-path failure falls back to the USDG path.
     function flush(address vault) external nonReentrant returns (uint256 amount) {
         amount = pending[vault];
         if (amount == 0) revert NothingToFlush();
         pending[vault] = 0;
+
+        if (_mode[vault] == FeeMode.WRITE) {
+            (bool paid, bytes32 reason) = _tryWritePath(vault, amount);
+            if (paid) {
+                address curator = curatorOf[vault];
+                usdg.safeTransferFrom(auctionHouse, curator, amount);
+                emit FeeFlushed(vault, curator, amount);
+                return amount;
+            }
+            emit WriteModeFallback(vault, reason);
+        }
+
         usdg.safeTransferFrom(auctionHouse, treasury, amount);
         emit FeeFlushed(vault, treasury, amount);
+    }
+
+    // ═════════════════════════════ curator (SPEC §11) ═════════════════════════════
+
+    /// @inheritdoc IFeeRouter
+    /// @dev Permissionless top-up: anyone may fund a vault's WRITE balance, only its curator may take it out.
+    function depositWrite(address vault, uint256 amount) external nonReentrant {
+        address token = writeToken;
+        if (token == address(0)) revert WriteNotLaunched();
+        if (!initialised[vault]) revert NotInitialised(vault);
+        if (amount == 0) revert ZeroAmount();
+        _writeBalance[vault] += amount;
+        IERC20(token).safeTransferFrom(msg.sender, address(this), amount);
+        emit WriteDeposited(vault, msg.sender, amount);
+    }
+
+    /// @inheritdoc IFeeRouter
+    /// @dev Withdrawals are allowed at any time, with no lock (SPEC §11). The launch check comes first so the
+    /// pre-launch revert reason stays `WriteNotLaunched` rather than `NotCurator` (D-089).
+    function withdrawWrite(address vault, uint256 amount) external nonReentrant {
+        address token = writeToken;
+        if (token == address(0)) revert WriteNotLaunched();
+        if (msg.sender != curatorOf[vault]) revert NotCurator();
+        if (amount == 0) revert ZeroAmount();
+        uint256 bal = _writeBalance[vault];
+        if (amount > bal) revert InsufficientWriteBalance(bal, amount);
+        _writeBalance[vault] = bal - amount;
+        IERC20(token).safeTransfer(msg.sender, amount);
+        emit WriteWithdrawn(vault, msg.sender, amount);
     }
 
     // ═════════════════════════════ admin (timelock) ═════════════════════════════
@@ -110,6 +189,32 @@ contract FeeRouter is IFeeRouter, Ownable2Step, ReentrancyGuard {
         if (auctionHouse != address(0)) revert AlreadySet();
         auctionHouse = auctionHouse_;
         emit AuctionHouseSet(auctionHouse_);
+    }
+
+    /// @notice One-time wiring of WRITE, post-launch. Until this lands, WRITE mode is unreachable (D-016).
+    function setWriteToken(address write_) external onlyOwner {
+        if (write_ == address(0)) revert ZeroAddress();
+        if (writeToken != address(0)) revert AlreadySet();
+        if (write_.code.length == 0) revert Miswired("WRITE_TOKEN");
+        writeToken = write_;
+        emit WriteTokenSet(write_);
+    }
+
+    /// @notice Points at the shared WRITE price oracle. Asserts it quotes the token this router debits.
+    function setPriceOracle(address oracle) external onlyOwner {
+        if (oracle == address(0)) revert ZeroAddress();
+        if (writeToken == address(0)) revert WriteNotLaunched();
+        if (IWritePriceOracle(oracle).writeToken() != writeToken) revert Miswired("ORACLE_WRITE");
+        emit ParameterChanged(address(this), "priceOracle", uint256(uint160(priceOracle)), uint256(uint160(oracle)));
+        priceOracle = oracle;
+    }
+
+    /// @notice The vault's curator: the account that funds and withdraws WRITE and receives the USDG rebate.
+    function setCurator(address vault, address curator) external onlyOwner {
+        if (!initialised[vault]) revert NotInitialised(vault);
+        if (curator == address(0)) revert ZeroAddress();
+        emit ParameterChanged(vault, "curator", uint256(uint160(curatorOf[vault])), uint256(uint160(curator)));
+        curatorOf[vault] = curator;
     }
 
     function setFeeBps(address vault, uint16 bps) external onlyOwner {
@@ -125,22 +230,27 @@ contract FeeRouter is IFeeRouter, Ownable2Step, ReentrancyGuard {
         treasury = treasury_;
     }
 
-    /// @notice WRITE mode is unreachable until `writePool` is set post-launch (SPEC §11, D-016).
+    /// @dev Global, not per-vault (D-087): a per-vault discount of 100 % would be a silent fee waiver.
+    function setWriteDiscountBps(uint16 bps) external onlyOwner {
+        if (bps > MAX_DISCOUNT_BPS) revert OutOfBounds();
+        emit ParameterChanged(address(this), "writeDiscountBps", writeDiscountBps, bps);
+        writeDiscountBps = bps;
+    }
+
+    function setWriteBurnShareBps(uint16 bps) external onlyOwner {
+        if (bps > MAX_BURN_SHARE_BPS) revert OutOfBounds();
+        emit ParameterChanged(address(this), "writeBurnShareBps", writeBurnShareBps, bps);
+        writeBurnShareBps = bps;
+    }
+
+    /// @notice WRITE mode is unreachable until the token and its oracle are wired (SPEC §11, D-016, D-084).
     function setFeeMode(address vault, FeeMode newMode) external onlyOwner {
         if (!initialised[vault]) revert NotInitialised(vault);
-        if (newMode == FeeMode.WRITE && writePool == address(0)) revert WriteNotLaunched();
+        if (newMode == FeeMode.WRITE && (writeToken == address(0) || priceOracle == address(0))) {
+            revert WriteNotLaunched();
+        }
         emit ParameterChanged(vault, "feeMode", uint256(_mode[vault]), uint256(newMode));
         _mode[vault] = newMode;
-    }
-
-    // ═════════════════════════════ WRITE mode stubs (post-token) ═════════════════════════════
-
-    function depositWrite(address, uint256) external pure {
-        revert WriteNotLaunched();
-    }
-
-    function withdrawWrite(address, uint256) external pure {
-        revert WriteNotLaunched();
     }
 
     // ═════════════════════════════ views (SPEC §16.2) ═════════════════════════════
@@ -156,7 +266,61 @@ contract FeeRouter is IFeeRouter, Ownable2Step, ReentrancyGuard {
     }
 
     /// @inheritdoc IFeeRouter
-    function writeBalance(address) external pure returns (uint256) {
-        return 0;
+    function writeBalance(address vault) external view returns (uint256) {
+        return _writeBalance[vault];
+    }
+
+    /// @notice WRITE the curator would owe for a `feeUSD6` fee right now, and whether the path is available.
+    function previewWriteFee(uint256 feeUSD6) external view returns (uint256 writeAmount, bool ok) {
+        uint256 price8;
+        (price8, ok) = _quote();
+        if (!ok || price8 == 0) return (0, false);
+        writeAmount = _writeAmount(feeUSD6, price8);
+    }
+
+    // ═════════════════════════════ internal ═════════════════════════════
+
+    /// @dev Never reverts: every failure is a reason code, so `flush` degrades to the USDG path instead of
+    /// stranding the fee.
+    function _tryWritePath(address vault, uint256 feeUSD6) internal returns (bool paid, bytes32 reason) {
+        address token = writeToken;
+        if (token == address(0)) return (false, "WRITE_UNSET");
+        address curator = curatorOf[vault];
+        if (curator == address(0)) return (false, "CURATOR_UNSET");
+
+        (uint256 price8, bool ok) = _quote();
+        if (!ok || price8 == 0) return (false, "NO_PRICE");
+
+        uint256 writeAmount = _writeAmount(feeUSD6, price8);
+        if (writeAmount == 0) return (false, "ZERO_WRITE");
+
+        uint256 bal = _writeBalance[vault];
+        if (writeAmount > bal) return (false, "INSUFFICIENT_WRITE");
+        _writeBalance[vault] = bal - writeAmount;
+
+        uint256 burned = Math.mulDiv(writeAmount, writeBurnShareBps, BPS);
+        if (burned != 0) IERC20Burnable(token).burn(burned);
+        uint256 toTreasury = writeAmount - burned;
+        if (toTreasury != 0) IERC20(token).safeTransfer(treasury, toTreasury);
+
+        emit WriteFeePaid(vault, curator, feeUSD6, writeAmount, burned, price8);
+        return (true, "OK");
+    }
+
+    /// @dev 6-dec USDG fee → discounted USD → 18-dec WRITE at an 8-dec price: 6 + 20 − 8 = 18. Both legs
+    /// round up (D-088), so a curator can never underpay by a rounding unit on a repeated clearing.
+    function _writeAmount(uint256 feeUSD6, uint256 price8) internal view returns (uint256) {
+        uint256 discounted6 = Math.mulDiv(feeUSD6, BPS - writeDiscountBps, BPS, Math.Rounding.Ceil);
+        return Math.mulDiv(discounted6, 1e20, price8, Math.Rounding.Ceil);
+    }
+
+    function _quote() internal view returns (uint256 price8, bool ok) {
+        address o = priceOracle;
+        if (o == address(0)) return (0, false);
+        try IWritePriceOracle(o).writePrice() returns (uint256 p, bool available) {
+            return (p, available);
+        } catch {
+            return (0, false);
+        }
     }
 }
