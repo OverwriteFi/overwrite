@@ -1434,6 +1434,6 @@ vault/mirror agreement across the stateful run, with `test_handlerReachesShortfa
 path is not vacuous (a random walk has to burn through half the collateral first). `test_T11_injectCoverage
 RestoresFullPayout` and `test_e2e_slashCoversAShortfall` close the loop THREAT-MODEL T-11.3 and SPEC §14
 describe. Vault size 19,542 → 20,778 bytes (3,798 headroom). Tests: 676 → 692, green under
-`FOUNDRY_PROFILE=ci`. `CoveredCallVault` still does not override `renounceOwnership` while eight sibling
-contracts do; a renounce would now brick the shortfall-repair path, so that override is the next hardening
-item.
+`FOUNDRY_PROFILE=ci`. `CoveredCallVault` was also the last owned contract without a `renounceOwnership`
+override; since a renounce would now brick the shortfall-repair path (and `setSunset`, the D-034 migration
+route) it reverts `RenounceDisabled` like its eight siblings, pinned by `test_renounceOwnershipDisabled`.

@@ -140,6 +140,7 @@ contract CoveredCallVault is ERC4626, ReentrancyGuard, Ownable2Step, ICoveredCal
     error NothingToClaim();
     error OutOfBounds();
     error NoShortfall(uint256 seriesId);
+    error RenounceDisabled();
 
     // ───────────────────────────── events (SPEC §16.1) ─────────────────────────────
 
@@ -761,6 +762,12 @@ contract CoveredCallVault is ERC4626, ReentrancyGuard, Ownable2Step, ICoveredCal
         optionToken.raisePayout(seriesId, ppoNew.toUint128());
         IERC20(asset()).safeTransferFrom(msg.sender, address(this), pulled);
         emit CoverageInjected(seriesId, pulled);
+    }
+
+    /// @dev An ownerless vault could never inject coverage, so a renounce would permanently brick the
+    /// shortfall-repair path (D-099); `setSunset`, the migration route of D-034, would go with it.
+    function renounceOwnership() public view override onlyOwner {
+        revert RenounceDisabled();
     }
 
     // ═════════════════════════════ views ═════════════════════════════

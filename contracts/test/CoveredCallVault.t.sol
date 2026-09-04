@@ -1112,6 +1112,19 @@ contract CoveredCallVaultTest is BaseTest {
         assertEq(vault.maxWithdraw(alice), 100e18);
     }
 
+    /// @dev Matches the eight sibling owned contracts: an ownerless vault could never call `injectCoverage`
+    /// (D-099) or `setSunset` (D-034), so the two recovery paths must not be renounceable away.
+    function test_renounceOwnershipDisabled() public {
+        vm.prank(admin);
+        vm.expectRevert(CoveredCallVault.RenounceDisabled.selector);
+        vault.renounceOwnership();
+        // a non-owner is still rejected by `onlyOwner` first, so ownership cannot be dropped by anyone
+        vm.prank(alice);
+        vm.expectRevert(abi.encodeWithSelector(Ownable.OwnableUnauthorizedAccount.selector, alice));
+        vault.renounceOwnership();
+        assertEq(vault.owner(), admin, "the timelock still owns the vault");
+    }
+
     function test_setMaxQueueOps() public {
         vm.prank(alice);
         vm.expectRevert(abi.encodeWithSelector(Ownable.OwnableUnauthorizedAccount.selector, alice));
