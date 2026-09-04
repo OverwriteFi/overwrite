@@ -40,7 +40,24 @@ src/
   interfaces/               IStockToken (ERC-8056), IRiskModule, ICapController, IPriceSource, ISafetyModule, IOptionToken,
                             ICoveredCallVault, IAuctionHouse, IBondManager, IFeeRouter, ISettlementOracle, AggregatorV3Interface,
                             IUniswapV3Pool
-  mocks/                    MockStockToken, MockUSDG (testnet mocks, SPEC §1.8 / D-014; USDG has `paused()` / `isFrozen()`)
+  mocks/                    the four testnet mocks of SPEC §1.8 / D-014, deployable by `script/` because a chain that has
+                            none of the real ones needs them on chain: MockStockToken, MockUSDG (`paused()` / `isFrozen()`),
+                            MockAggregatorV3 (phase-aware rounds; doubles as the sequencer and USDG/USD feed),
+                            MockUniswapV3Pool (real observation ring: cumulative math, interpolation, OLD) — D-106
+script/
+  Config.sol                reads `config/<chainId>.json` into `DeployConfig` and rejects anything the contracts would
+                            (the same bounds `RiskModule._validate` enforces), so a bad parameter fails before any tx
+  MockDeployLib.sol         deploys and seeds a mock for exactly those externals whose config address is zero (D-102)
+  VaultDeployLib.sol        the one description of the vault-layer ordering; the wiring is returned as timelock
+                            **calldata**, not as calls, so the tests execute the arrays governance will (D-103)
+  TokenDeployLib.sol        the same for the WRITE token layer (D-098), unchanged
+  Deployment.sol            `deployments/<chainId>.json`: the address book a deploy writes and a re-run reads back
+  DeployChecks.sol          every post-deploy assertion, in one place, with four callers
+  Deploy.s.sol              the four stages; `deploy.sh` is the one command that drives them
+  Verify.s.sol              standalone verification of a deployed system + the Blockscout commands
+  deploy.sh                 deploys and links TickMath first (D-058), then runs the stages, then verifies
+config/                     `4663.json` and `46630.json`: every address and parameter of a deployment (D-101)
+deployments/                what a deploy produced, per chain; `46630.json` is the live testnet system
 test/
   Base.t.sol                fixture: one vault wired to mocks; AuctionHouse and Settlement are plain addresses
   AuctionBase.t.sol         fixture: real AuctionHouse + BondManager + FeeRouter wired to a vault, four bonded MMs, Monday 14:00
@@ -113,8 +130,14 @@ test/
                             prefunded-WRITE conservation, per-asset bond backing, bonded-implies-requirement, burn-only supply)
                             -- AuctionInvariants deliberately never enters WRITE mode or the migration (D-097), so this is
                             the only invariant coverage of either
-  mocks/                    MockRiskModule, MockPriceSource, MockSafetyModule, MockAggregatorV3 (phase-aware rounds, doubles as the
-                            sequencer and USDG/USD feed), MockUniswapV3Pool (real observation ring: cumulative math, interpolation, OLD)
+  mocks/                    MockRiskModule, MockPriceSource, MockSafetyModule (fixture-only; the four mocks a deploy can
+                            put on chain live in `src/mocks/`, D-106)
+  DeployHarness.t.sol       runs the deploy library through all four stages and executes both timelock batches through a
+                            real TimelockController, so the ordering is exercised the way governance will execute it
+  DeployLib.t.sol           the deploy layer on every `forge test`: both governance shapes, both pool orientations, a
+                            deposit straight after the handover, the batch order being load-bearing, the address book
+                            round-trip, and the two properties `docs/RUNBOOK.md` quotes
+  DeployFork.t.sol          the same library against a fork of a real chain (`DEPLOY_FORK_RPC_URL`), skipped when unset
 ```
 
 Foundry gotcha that bit this codebase more than five times: `vm.prank(x)` and `vm.expectRevert(...)` apply to the **very next call**, and a view read such as `vault.currentSeriesId()`, `ah.KEEPER_ROLE()` or `usdg.balanceOf(x)` inside the argument list counts. Read arguments into locals first. `vm.expectEmit` has the same shape: put it right before the emitting call, not before a helper that makes a view call or a mint first.
@@ -134,7 +157,7 @@ Slither 0.11.6 (`python -m slither . --filter-paths "lib/|test/|src/mocks/|scrip
 
 The token layer was independently reviewed on 2026-09-04 (D-098): the deploy is staged so the deployer key never owns anything, and the review's findings -- a vesting grant that could be fully vested in its creating block, a raw-AMM guard that only knew Uniswap's shape, a ~29 % slash-dodge duty cycle, a missing sequencer check on the WRITE oracle, and eight tests that passed without proving anything -- are all fixed and recorded there.
 
-Not yet built (next phases): VaultFactory, a fork test asserting the whole wiring, and the AuctionHouse switch from `capPrice` to `referencePrice` (OQ-005). `renounceOwnership` reverts `RenounceDisabled` on **all fourteen** owned contracts (D-100 closed the last three — AuctionHouse, CapController and OptionToken, which had been left out): an ownerless vault could never call `injectCoverage` or `setSunset`, an ownerless AuctionHouse could never register a vault or revoke a keeper, an ownerless CapController would freeze every cap, and an ownerless OptionToken could never serve another underlying. **`CoveredCallVault.injectCoverage` ships in v0.7 (D-099)**, so the slash-to-shortfall loop closes on chain: the timelock raises `payoutPerOption` for the still-unclaimed options of a shortfall series back to its unscaled value, pulling only what that raise makes claimable (SPEC §14; `coverageNeeded(seriesId)` sizes the purchase). The FeeRouter WRITE mode and the WRITE bond migration are implemented as of v0.6 but stay dormant until the timelock wires the token.
+Not yet built (next phases): VaultFactory, and the AuctionHouse switch from `capPrice` to `referencePrice` (OQ-005). The deploy layer and the fork test asserting the whole wiring ship in v0.8 (D-101…D-106): `./script/deploy.sh <chainId> (--ledger | --private-key)` is the one command, `script/Verify.s.sol` checks a deployed system standalone, and `docs/RUNBOOK.md` is the mainnet procedure. Rehearsed end to end on testnet 46630 on 2026-09-04 — 26 contracts plus TickMath, all four stages, all 27 verified on Blockscout (`contracts/deployments/46630.json`). `renounceOwnership` reverts `RenounceDisabled` on **all fourteen** owned contracts (D-100 closed the last three — AuctionHouse, CapController and OptionToken, which had been left out): an ownerless vault could never call `injectCoverage` or `setSunset`, an ownerless AuctionHouse could never register a vault or revoke a keeper, an ownerless CapController would freeze every cap, and an ownerless OptionToken could never serve another underlying. **`CoveredCallVault.injectCoverage` ships in v0.7 (D-099)**, so the slash-to-shortfall loop closes on chain: the timelock raises `payoutPerOption` for the still-unclaimed options of a shortfall series back to its unscaled value, pulling only what that raise makes claimable (SPEC §14; `coverageNeeded(seriesId)` sizes the purchase). The FeeRouter WRITE mode and the WRITE bond migration are implemented as of v0.6 but stay dormant until the timelock wires the token.
 
 ## Run
 
@@ -143,6 +166,22 @@ forge build --sizes
 forge test
 FOUNDRY_PROFILE=ci forge test --match-path 'test/invariants/*'
 forge fmt --check
+```
+
+Deploy (see `docs/RUNBOOK.md` before doing this on 4663):
+
+```bash
+./script/deploy.sh 46630 --private-key --dry-run   # simulate, and print the gas estimate
+./script/deploy.sh 46630 --private-key             # testnet: one command, all four stages
+./script/deploy.sh 4663  --ledger                  # mainnet: stage 1, then two Ledger-signed timelock batches
+forge script script/Verify.s.sol:Verify --sig "run()" --rpc-url robinhood_testnet \
+  --libraries src/libraries/TickMath.sol:TickMath:0xTHE_DEPLOYED_ADDRESS
+```
+
+The fork test needs an RPC and skips without one:
+
+```bash
+DEPLOY_FORK_RPC_URL="$ROBINHOOD_RPC_URL" forge test --match-path test/DeployFork.t.sol -vv
 ```
 
 `forge` lives at `~/.foundry/bin` on the dev machine (not on PATH).

@@ -10,6 +10,7 @@ import {MockDeployLib} from "../script/MockDeployLib.sol";
 import {VaultDeployLib} from "../script/VaultDeployLib.sol";
 
 import {CoveredCallVault} from "../src/CoveredCallVault.sol";
+import {RiskModule} from "../src/RiskModule.sol";
 import {SettlementOracle} from "../src/SettlementOracle.sol";
 import {ISettlementOracle} from "../src/interfaces/ISettlementOracle.sol";
 import {TimelockController} from "@openzeppelin/contracts/governance/TimelockController.sol";
@@ -136,6 +137,31 @@ contract DeployLibTest is DeployHarness {
         assertEq(c.vaults[0].stock, 0xd0601CE157Db5bdC3162BbaC2a2C8aF5320D9EEC, "NVDA");
         assertEq(c.vaults[0].pool, 0xd4EB21209C4D6093f80B5b84f5C45cc093EA14a3, "NVDA/USDG 0.05 %");
         assertEq(c.ext.sequencerFeed, address(0), "D-005: no uptime feed on this chain");
+    }
+
+    /// @notice The mainnet batch A is exactly the calls docs/RUNBOOK.md says a Ledger will be asked to
+    /// schedule. The runbook quotes this number so the operator can sanity-check the device against it before
+    /// blind-signing, so it has to be pinned: adding a vault or a guardian changes it, and the runbook with it.
+    function test_mainnetBatchAIsTheSizeTheRunbookQuotes() public {
+        DeployConfig memory c = Config.read(MAINNET);
+        c.gov.admin = admin;
+        c.gov.keeper = keeper;
+        c.gov.treasury = treasury;
+        c.gov.guardians = new address[](2);
+        c.gov.guardians[0] = guardianHot;
+        c.gov.guardians[1] = guardianCold;
+
+        VaultDeployLib.Core memory k;
+        k.riskModule = new RiskModule(admin); // batchA reads `defaultParams()` off it
+        address[] memory vaults = new address[](1);
+        vaults[0] = makeAddr("vault");
+
+        (address[] memory targets,) = VaultDeployLib.batchA(c, k, vaults, _emptyHolders(), makeAddr("write"));
+        assertEq(targets.length, 17, "docs/RUNBOOK.md quotes 17 calls for the shipped 4663 config");
+
+        // Without the token layer the five setWriteToken calls are not emitted.
+        (address[] memory noToken,) = VaultDeployLib.batchA(c, k, vaults, _emptyHolders(), address(0));
+        assertEq(noToken.length, 12, "vault layer alone");
     }
 
     // ───────────────────────────── the address book ─────────────────────────────

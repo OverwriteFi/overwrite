@@ -1477,3 +1477,171 @@ role is a legitimate rotation step, it costs the protocol nothing, and the timel
 3,506 → 3,522. The deploy layer's `DeployChecks` keeps a WARN sweep that `staticcall`s `renounceOwnership()`
 on every owned contract and lists any that do not revert; with all fourteen protected it prints nothing, so it
 stands as a regression detector for the day a fifteenth owned contract is added without the override.
+
+---
+
+## D-101 · 2026-09-05 · The deploy layer is config-driven, one JSON file per chain
+
+**Decision.** `config/<chainId>.json` holds every address and parameter of a deployment: governance keys,
+externals, per-vault stock/feed/pool, caps, fee bps, curator floors and the full `OracleParams` block.
+`script/Config.sol` reads it and validates every value against the same bounds `RiskModule._validate` and the
+AuctionHouse enforce, so a bad parameter fails before the first transaction rather than half way through a
+timelock batch. Nothing about a chain is hard-coded in Solidity.
+
+**Why.** The ordering and the parameters previously existed only as prose in `contracts/README.md` and as a
+hand-rolled fixture in `test/SettlementBase.t.sol`, and the ordering is full of one-shot, unrecoverable
+setters. A config file makes the mainnet and testnet deployments the same code path with different data, and
+makes the difference between them reviewable as data rather than as code. `config/4663.json` ships with zero
+governance addresses so a mainnet deploy cannot start before a human fills them in, which
+`test_mainnetConfigRefusesPlaceholderGovernance` pins.
+
+**Alternatives considered.** *Environment variables, as `DeployToken.s.sol` does* — rejected once the vault
+layer arrived: a per-vault `OracleParams` block is thirteen values, and `TIMELOCK_ADDRESS`-style flat env vars
+cannot express an array of vaults without inventing an indexing convention worse than JSON. *Solidity
+constants per chain* — rejected: it puts a mainnet address change behind a recompile and a code review, where
+it should be a data change. *`abi.decode`ing the whole struct out of `vm.parseJson`* — rejected: that path
+requires the Solidity struct fields to be in alphabetical order and mis-assigns them silently otherwise, which
+is a footgun with addresses on the other end. Fields are read one key at a time.
+
+**Consequences.** `test/DeployLib.t.sol` reads both real configs; the mainnet one is asserted to name the real
+USDG, feed and pool from SPEC §1.4/§1.5 and to refuse placeholder governance.
+
+---
+
+## D-102 · 2026-09-05 · A mock is deployed exactly where the config address is zero, and the address book is what a re-run reads back
+
+**Decision.** `script/MockDeployLib.sol` deploys a mock for precisely those externals whose config address is
+`0x0`. There is no `isTestnet` flag: on 4663 every address is real so nothing is mocked, on 46630 nothing is
+real so all eight are. The addresses it creates are recorded in `deployments/<chainId>.json`, and a re-run
+reads them back from there and reuses them. `config/<chainId>.json` is a hand-maintained input and is never
+written to by the deploy.
+
+**Why.** The rule has to be mechanical, because "what was mocked" is a question an auditor will ask about a
+deployment months later, and a boolean flag in a script answers it badly. The zero address in the config is
+both the instruction and the record, and `deployments/<chainId>.json` carries an explicit `mocked` list of
+human-readable names alongside it.
+
+The reuse source is the address book rather than the config because of a concrete finding: **`vm.writeJson`
+cannot address an array element at all.** Both `.vaults[0].stock` and `$.vaults[0].stock` create a literal
+top-level key of that name and leave the real array entry untouched. The first 46630 deployment shipped with a
+write-back that did exactly this: `external.usdg` (a flat key) was updated correctly while every
+`vaults[i].stock/feed/pool` stayed zero and two junk `"vaults[0]"` / `"vaults[1]"` objects were appended. A
+re-run would have read those zeros, concluded the mocks did not exist, and deployed a second full set of mocks
+and a second system. Nothing was lost — the address book was correct throughout — but the config had to be
+repaired by hand.
+
+**Alternatives considered.** *Keep the write-back and patch the config as text* — rejected: a regex over a
+hand-formatted JSON file with comments, run at deploy time against a file that is also an input, is a worse
+failure mode than the one it replaces. *Rewrite the whole config from the in-memory struct* — rejected: it
+would discard the `_comment` keys, which are the only documentation a config file can carry. *Drop reuse
+entirely and always deploy fresh mocks* — rejected: it makes every testnet iteration cost a new set of
+addresses, which invalidates the keeper and frontend configuration each time.
+
+**Consequences.** `Deployment.write` also emits `mockedCount`, because `readStringArray` on an empty JSON
+array is not worth the risk and a chain that mocked nothing must still read back cleanly;
+`test_addressBookRoundTrips` pins both shapes. A re-run of the 46630 deploy now reports the same eight mocks
+and estimates 56.5 M gas instead of 78.2 M, the difference being the mock deployment and seeding it no longer
+does. Deleting `deployments/<chainId>.json` forces a fresh set. `fs_permissions` grants read-write on
+`./deployments` only; the rest of the project, `config/` included, stays read-only.
+
+---
+
+## D-103 · 2026-09-05 · Four stages across both layers, with the wiring expressed as timelock calldata rather than as calls
+
+**Decision.** The deploy is four stages: the deployer `new`s everything (core, vaults, the five WRITE holders
+and WRITE), a timelock batch wires all of it, the deployer `new`s `WritePriceOracle` and `SafetyModule`, a
+second timelock batch finishes. Every contract takes the `TimelockController` as its `owner_`, so the deployer
+key never holds a privilege and there is no ownership transfer at all. `VaultDeployLib.batchA` and `batchB`
+return `(targets, payloads)` — **calldata, not calls**.
+
+**Why.** D-098 established owner-from-birth for the token layer; extending it to the vault layer is the same
+argument with vaults attached. The calldata shape is the part worth arguing for: the timelock has to be
+`msg.sender` of every setter, so a direct-call version of the ordering could only ever be exercised by pranking
+the owner, which is not what happens on chain. Returning calldata means `test/DeployHarness.t.sol` executes the
+very same arrays through a real `TimelockController`, and there is no second copy of the ordering to fall out
+of sync. `test_batchOrderIsLoadBearing` shows the ordering is not cosmetic: pulled out of sequence,
+`settlementOracle.registerVault` reverts `Miswired("RISK_MODULE_ORACLE")`.
+
+Batch A emits the per-vault curator floors, `feeBps` and `setOracleParams` **only where the config differs from
+what the contracts already seeded**, so with the shipped defaults the mainnet batch is 17 calls rather than 24.
+A Ledger blind-signs `scheduleBatch`; the batch a human has to reconcile against the device should be as short
+as it can be. `test_mainnetBatchAIsTheSizeTheRunbookQuotes` pins the number the runbook quotes.
+
+**Alternatives considered.** *`Ownable2Step.transferOwnership` then `acceptOwnership` after the delay* —
+rejected for the same reason D-098 rejected it: it leaves one hot key owning everything for 48 h. *One batch
+for all four stages* — impossible: `SafetyModule`'s constructor asserts `emissions.writeToken() == write`,
+which only batch A can make true. *Separate batches per vault* — rejected: `settlementOracle.registerVault`
+needs `auctionHouse.registerVault` to have executed, so splitting them doubles the 48 h waits for no gain.
+
+**Consequences.** On a chain with `timelockMinDelay == 0` where the broadcaster is the admin EOA, `run()`
+schedules and executes both batches itself and completes all four stages in one command; on 4663 it stops
+after stage 1 and prints the calldata. `docs/RUNBOOK.md` is the mainnet procedure. Batch salts are
+`keccak256("overwrite.deploy.batchA")` and `...batchB`, deterministic so the operation id is reproducible
+before signing.
+
+---
+
+## D-104 · 2026-09-05 · `AuctionHouse` and `CapController` are constructed with a dead price-source placeholder
+
+**Decision.** Both constructors require a non-zero `priceSource`, and the real one is the `SettlementOracle`,
+which needs the `AuctionHouse` in its own constructor. Both are constructed with
+`external.priceSourcePlaceholder` from the config and re-pointed in batch A.
+
+**Why.** It is the cycle `contracts/README.md` already documents, and the placeholder is only ever read between
+stage 1 and batch A. In that window `CoveredCallVault._capHeadroom` catches the failing call (D-041) and
+`maxDeposit` returns 0 rather than reverting, so ERC-4626's "must not revert" holds; and `capUSD` is 0 anyway,
+so no deposit is possible whatever the price source says.
+
+**Alternatives considered.** *A `DeadPriceSource` shim contract returning `(0, false)`* — rejected: it is a
+cleaner failure mode by a hair, at the cost of an extra contract on mainnet that exists only to be discarded,
+which someone will later have to explain. *Deploy `CapController` after the oracle so it gets the real source
+in its constructor* — tempting, and it would remove one batch call, but it departs from the order
+`contracts/README.md` prescribes and `test/SettlementBase.t.sol` exercises, for a saving of one call in a batch
+that is already reviewed line by line. Rejected in favour of matching the documented order exactly. *Make the
+constructors accept zero* — rejected: it removes a real guard from two production contracts to serve the
+deploy script.
+
+---
+
+## D-105 · 2026-09-05 · On 46630 the deployer doubles as the admin EOA, declared in the config
+
+**Decision.** `config/46630.json` sets `timelockMinDelay: 0` and points `admin`, `guardians`, `treasury` and
+`keeper` at the deployer address, with an explicit `deployerIsAdmin: true`. `DeployChecks` reads that flag and
+waives **only** the timelock-role half of the deployer-is-powerless assertion, printing a `TESTNET DEVIATION`
+banner in its place. Owning no contract and holding no WRITE are still asserted, as is every wiring, cap, fee,
+bond and pause check.
+
+**Why.** Only one key is funded on 46630, and the point of the testnet run is to rehearse the deployment, not
+the key custody. Making the deviation a declared config field rather than an implicit consequence means the
+verification can be strict on 4663 without a chain-id special case anywhere in the assertion code, and the
+report says out loud which guarantees are not being demonstrated.
+
+**Alternatives considered.** *Grant the deployer PROPOSER/EXECUTOR temporarily and renounce at the end* — would
+make the end state identical to mainnet and was the better option on the merits, but it needs a second funded
+key to hold governance afterwards, and there is not one. *Keep 48 h on testnet too* — rejected: it leaves the
+testnet system unwired for two days after every iteration, which defeats the purpose of having one. *Chain-id
+branches inside `DeployChecks`* — rejected: an `if (chainid == 46630)` in the assertion library is exactly the
+kind of thing that survives into a mainnet deploy.
+
+**Consequences.** `test_deployAndWire_deployerEndsPowerless` runs the strict shape with five distinct keys and
+`test_deployAndWire_testnetShapeStillPasses` runs the shipped config, so both paths are covered.
+
+---
+
+## D-106 · 2026-09-05 · `MockAggregatorV3` and `MockUniswapV3Pool` move to `src/mocks/`
+
+**Decision.** Both move from `test/mocks/` to `src/mocks/`, joining `MockStockToken` and `MockUSDG`.
+
+**Why.** SPEC §1.8 / D-014 names all four as the testnet mock set, and two of them were already in `src/mocks/`
+for exactly that reason: a deploy script has to be able to deploy them. A script importing from `test/` would
+work — nothing in the toolchain forbids it — but it drags the fixture tree into every `forge build --sizes`,
+and it inverts the dependency this repo already has (`test/TokenBase.t.sol` imports
+`script/TokenDeployLib.sol`, not the other way round). Both files import only `src/` interfaces, so the move is
+a path change and nothing else, and Slither already filters `src/mocks/`.
+
+**Alternatives considered.** *Duplicate them into `src/mocks/`* — rejected outright: two copies of an
+observation-ring implementation is how a test fixture and a deployed mock start disagreeing about what the
+protocol reads. *Import from `test/` in the script* — rejected as above.
+
+**Consequences.** Fourteen import lines updated across ten test files; no behaviour change, and the full suite
+stayed green through the move.
