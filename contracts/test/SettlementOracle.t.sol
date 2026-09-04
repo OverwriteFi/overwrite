@@ -11,6 +11,7 @@ import {MockStockToken} from "../src/mocks/MockStockToken.sol";
 import {MockAggregatorV3} from "./mocks/MockAggregatorV3.sol";
 import {MockUniswapV3Pool} from "./mocks/MockUniswapV3Pool.sol";
 import {MockRiskModule} from "./mocks/MockRiskModule.sol";
+import {RiskModule} from "../src/RiskModule.sol";
 import {OracleParams, SeriesState, VaultState} from "../src/Types.sol";
 import {TickMath} from "../src/libraries/TickMath.sol";
 import {OracleMath} from "../src/libraries/OracleMath.sol";
@@ -221,7 +222,6 @@ contract SettlementOracleTest is SettlementBaseTest {
         uint80 last1 = _feedRoundAt(e - 1 hours, PRICE);
         _feedRoundAtPhase(2, 1, e + 10, PRICE);
         vm.warp(e + 10);
-        assertTrue(oracle.isLastRoundAtOrBefore(address(vault), last1, e));
         oracle.settle(id, _hint(last1));
         assertEq(oracle.records(id).roundId, last1);
     }
@@ -606,7 +606,6 @@ contract SettlementOracleTest is SettlementBaseTest {
         (uint256 id, ISettlementOracle.Hint memory h, uint64 e) = _weekendNoTwap();
         h.afterRoundId = _feedRoundAt(e + 600, 205e8);
         vm.warp(e + 700);
-        assertTrue(oracle.isFirstRoundAfter(address(vault), h.afterRoundId, 0, e));
         vm.expectEmit(true, true, true, true);
         emit SettlementOracle.PathRejected(id, 2, "OBSERVATIONS");
         vm.expectEmit(true, true, true, true);
@@ -989,16 +988,16 @@ contract SettlementOracleTest is SettlementBaseTest {
 
     function test_resolveHaltedByOracle_guards() public {
         (uint256 id, uint64 e) = _halted();
-        uint80 first = _feedRoundAt(e + 1 days, 0);
-        uint80 second = _feedRoundAt(e + 2 days, 210e8);
+        uint80 first = _feedRoundAt(e + 1 days, 210e8);
+        uint80 second = _feedRoundAt(e + 2 days, 205e8);
         vm.warp(e + 7 days);
         vm.expectRevert(abi.encodeWithSelector(SettlementOracle.BadAfterRoundHint.selector, second));
-        oracle.resolveHaltedByOracle(id, second, 0);
-        vm.expectRevert(abi.encodeWithSelector(SettlementOracle.InvalidRound.selector, first));
-        oracle.resolveHaltedByOracle(id, first, 0); // A10: a garbage first-after round leaves it to the timelock
+        oracle.resolveHaltedByOracle(id, second, 0); // the hint must be the first round after expiry
         vm.prank(admin);
         stock.setOraclePaused(true);
         (bool ok,) = oracle.canResolveByOracle(id);
+        assertFalse(ok);
+        (ok,) = oracle.previewResolveByOracle(id, first, 0);
         assertFalse(ok);
         vm.expectRevert(SettlementOracle.OraclePaused.selector);
         oracle.resolveHaltedByOracle(id, first, 0);
@@ -1008,7 +1007,200 @@ contract SettlementOracleTest is SettlementBaseTest {
         oracle.resolveHalted(id, 200e8, "timelock");
         assertEq(vault.series(id).settlementPath, 4);
         vm.expectRevert(abi.encodeWithSelector(SettlementOracle.NotHalted.selector, id));
-        oracle.resolveHaltedByOracle(id, second, 0);
+        oracle.resolveHaltedByOracle(id, first, 0);
+    }
+
+    /// D-057 (review finding 2), SPEC §9.6 "the first **valid** round after expiry": a garbage round published right
+    /// after expiry must not kill the permissionless resolution, which is the whole point of D-033 / I-14.
+    function test_T14_resolveHaltedByOracle_skipsGarbageFirstAfter() public {
+        (uint256 id, uint64 e) = _halted();
+        uint80 garbage = _feedRoundAt(e + 1 hours, 0);
+        uint80 good = _feedRoundAt(e + 2 hours, 210e8);
+        vm.warp(e + 7 days);
+        (bool ok, uint256 price8) = oracle.previewResolveByOracle(id, garbage, 0);
+        assertTrue(ok, "preview: resolvable through the garbage round");
+        assertEq(price8, 210e8);
+        // a hint that skips the garbage round on the caller's side is still rejected: the hint is a position claim
+        (ok,) = oracle.previewResolveByOracle(id, good, 0);
+        assertFalse(ok);
+        vm.prank(bob);
+        oracle.resolveHaltedByOracle(id, garbage, 0);
+        assertEq(vault.series(id).settlementPath, 5);
+        assertEq(vault.series(id).settlementPrice, 210e8);
+        assertEq(oracle.records(id).roundId, good, "the round actually used is recorded");
+    }
+
+    /// Same skip on path 3: a garbage first-after round must not remove the weekend fallback.
+    function test_settle_path3_skipsGarbageFirstAfter() public {
+        (uint256 id, ISettlementOracle.Hint memory h, uint64 e) = _weekendNoTwap();
+        h.afterRoundId = _feedRoundAt(e + 300, 0);
+        uint80 good = _feedRoundAt(e + 600, 204e8);
+        vm.warp(e + 700);
+        oracle.settle(id, h);
+        assertEq(vault.series(id).settlementPath, 3);
+        assertEq(vault.series(id).settlementPrice, 204e8);
+        assertEq(oracle.records(id).roundId, good);
+    }
+
+    /// D-057 (review finding 1): a run of invalid rounds longer than MAX_GARBAGE_SKIP makes every hint
+    /// unverifiable, so `settle` and the normal `halt` both refuse — but the 7-day backstop still frees the vault
+    /// and depositors get their collateral back. Before the fix the series stayed LIVE forever.
+    function test_T14_longGarbageRunCannotBrickTheVault() public {
+        uint256 id = _liveWeekday();
+        uint64 e = vault.series(id).expiry;
+        uint80 good = _feedRoundAt(e - 2 hours, PRICE);
+        for (uint256 i; i < 40; ++i) {
+            _feedRoundAt(e - 2 hours + 60 * (i + 1), 0);
+        }
+        vm.warp(e + 1801);
+        vm.expectRevert(abi.encodeWithSelector(SettlementOracle.BadRefRoundHint.selector, good));
+        oracle.settle(id, _hint(good));
+        vm.expectRevert(SettlementOracle.RefRoundRequired.selector);
+        oracle.settle(id, _hint(0));
+        vm.expectRevert(SettlementOracle.RefRoundRequired.selector);
+        oracle.canHalt(id, _hint(0)); // before the backstop an unusable hint is an error, not a halt
+
+        vm.warp(e + 7 days);
+        (bool ok, bytes32 reason) = oracle.canHalt(id, _hint(0));
+        assertTrue(ok, "backstop: unverifiable hints count as no path");
+        assertEq(reason, bytes32("NO_ORACLE_PATH"));
+        vm.prank(bob);
+        oracle.halt(id, _hint(0));
+        assertEq(oracle.records(id).resolveRef, PRICE, "resolveRef falls back to sRef");
+        uint80 after_ = _feedRoundAt(e + 7 days, 205e8);
+        vm.prank(bob);
+        oracle.resolveHaltedByOracle(id, after_, 0);
+        assertEq(uint8(vault.state()), uint8(VaultState.IDLE));
+        uint256 shares = vault.balanceOf(alice);
+        vm.prank(alice);
+        vault.redeem(shares, alice, alice);
+    }
+
+    /// The skip bound is 32, so a realistic run of invalid rounds still verifies.
+    function test_settle_refHint_skipsLongGarbageRun() public {
+        uint256 id = _liveWeekday();
+        uint64 e = vault.series(id).expiry;
+        uint80 good = _feedRoundAt(e - 3 hours, 210e8);
+        for (uint256 i; i < 20; ++i) {
+            _feedRoundAt(e - 3 hours + 60 * (i + 1), 0);
+        }
+        vm.warp(e);
+        oracle.settle(id, _hint(good));
+        assertEq(vault.series(id).settlementPrice, 210e8);
+    }
+
+    /// D-057 (review finding 3): the backstop is a liveness escape, not a way to replace a working settlement.
+    /// With a path still available the 7-day halt is refused and `settle` produces the true price.
+    function test_T08_backstopDoesNotPreemptAvailablePath() public {
+        uint256 id = _liveWeekday();
+        uint64 e = vault.series(id).expiry;
+        uint80 r = _feedRoundAt(e - 1 hours, 230e8);
+        vm.warp(e + 8 days); // keeper outage well past the backstop
+        (bool ok, uint8 path) = _preview(id, r);
+        assertTrue(ok);
+        assertEq(path, 1);
+        (bool canHalt, bytes32 reason) = oracle.canHalt(id, _hint(r));
+        assertFalse(canHalt, "a live path is never pre-empted");
+        assertEq(reason, bytes32("PATH_AVAILABLE"));
+        vm.prank(bob);
+        vm.expectRevert(abi.encodeWithSelector(SettlementOracle.CannotHalt.selector, bytes32("PATH_AVAILABLE")));
+        oracle.halt(id, _hint(r));
+        oracle.settle(id, _hint(r));
+        assertEq(vault.series(id).settlementPrice, 230e8);
+    }
+
+    /// The same for a weekend series whose path-3 round is inside the Monday deadline.
+    function test_T08_backstopDoesNotPreemptPath3() public {
+        (uint256 id, ISettlementOracle.Hint memory h, uint64 e) = _weekendNoTwap();
+        h.afterRoundId = _feedRoundAt(e + 600, 205e8);
+        vm.warp(e + 8 days);
+        (bool ok, bytes32 reason) = oracle.canHalt(id, h);
+        assertFalse(ok);
+        assertEq(reason, bytes32("PATH_AVAILABLE"));
+        oracle.settle(id, h);
+        assertEq(vault.series(id).settlementPath, 3);
+    }
+
+    /// D-057 (review finding 4): "no round at or before expiry" is checked against the feed's registered first
+    /// round AND its own latest round, so deleting one round no longer lets a griefer halt a healthy series.
+    function test_T08_zeroRefClaimRejectedWhenTheFeedShowsARound() public {
+        uint256 id = _liveWeekday();
+        uint64 e = vault.series(id).expiry;
+        uint80 good = _feedRoundAt(e - 1 hours, PRICE);
+        feed.deleteRound(feed.roundId(1, 1)); // the registered first round becomes unreadable
+        vm.warp(e + 1801);
+        vm.expectRevert(SettlementOracle.RefRoundRequired.selector);
+        oracle.settle(id, _hint(0));
+        vm.expectRevert(SettlementOracle.RefRoundRequired.selector);
+        oracle.halt(id, _hint(0));
+        oracle.settle(id, _hint(good));
+        assertEq(vault.series(id).settlementPath, 1);
+    }
+
+    /// D-057 (review finding 7): hostile external inputs must fail the guard, not revert it.
+    function test_T05_sequencerFutureStartedAtCountsAsDown() public {
+        OracleParams memory p = _params();
+        p.sequencerFeed = address(seqFeed);
+        _setParams(p);
+        uint256 id = _liveWeekday();
+        uint64 e = vault.series(id).expiry;
+        uint80 r = _feedRoundAt(e - 1 hours, PRICE);
+        vm.warp(e);
+        seqFeed.setRound(1, 0, block.timestamp + 1 days, block.timestamp);
+        vm.expectRevert(abi.encodeWithSelector(SettlementOracle.NotSettleable.selector, bytes32("SEQUENCER_DOWN")));
+        oracle.settle(id, _hint(r));
+        vm.warp(e + 7 days);
+        seqFeed.setRound(2, 0, block.timestamp + 1 days, block.timestamp); // still reporting a future startedAt
+        (bool ok, bytes32 reason) = oracle.canHalt(id, _hint(r));
+        assertTrue(ok, "a broken sequencer feed never blocks the backstop");
+        assertEq(reason, bytes32("NO_ORACLE_PATH"));
+        oracle.halt(id, _hint(r));
+        assertEq(uint8(vault.series(id).state), uint8(SeriesState.HALTED));
+    }
+
+    function test_T10_absurdMultiplierFailsTheGuardWithoutReverting() public {
+        uint256 id = _liveWeekday();
+        uint64 e = vault.series(id).expiry;
+        vm.startPrank(admin);
+        stock.stageMultiplier(1, block.timestamp - 1); // m_now = 1 wei: ratio far beyond any corporate action
+        stock.applyMultiplier();
+        vm.stopPrank();
+        uint80 r = _feedRoundAt(e - 1 hours, type(uint128).max);
+        vm.warp(e);
+        (bool ok,,, bytes32 reason) = oracle.previewSettle(id, _hint(r));
+        assertFalse(ok, "guard fails instead of reverting on overflow");
+        assertEq(reason, bytes32("OBSERVATIONS"));
+    }
+
+    /// CLAUDE.md rule 5: the timelock must not be able to strand the contracts.
+    function test_renounceOwnershipDisabled() public {
+        vm.prank(admin);
+        vm.expectRevert(SettlementOracle.RenounceDisabled.selector);
+        oracle.renounceOwnership();
+        vm.prank(admin);
+        vm.expectRevert(RiskModule.RenounceDisabled.selector);
+        rm.renounceOwnership();
+        assertEq(oracle.owner(), admin);
+        assertEq(rm.owner(), admin);
+    }
+
+    /// A feed that serves no round at all cannot be registered (D-057).
+    function test_registerVault_requiresAReachableFirstRound() public {
+        (CoveredCallVault v, MockStockToken s) = _newVault(address(oracle), address(rm), true);
+        MockUniswapV3Pool p =
+            new MockUniswapV3Pool(address(usdg), address(s), 500, TICK_200, POOL_LIQ, uint32(START_TS));
+        MockAggregatorV3 empty = new MockAggregatorV3(8);
+        vm.prank(admin);
+        vm.expectRevert(abi.encodeWithSelector(SettlementOracle.Miswired.selector, bytes32("FEED_FIRST_ROUND")));
+        oracle.registerVault(address(v), address(empty), address(p));
+        empty.setRound(empty.roundId(3, 1), 200e8, START_TS); // a later phase is found by the probe
+        vm.prank(admin);
+        oracle.registerVault(address(v), address(empty), address(p));
+        assertEq(oracle.vaultConfig(address(v)).firstRound, empty.roundId(3, 1));
+    }
+
+    function _preview(uint256 id, uint80 refId) internal view returns (bool ok, uint8 path) {
+        (ok,, path,) = oracle.previewSettle(id, _hint(refId));
     }
 
     // ═════════════════════════════ price views (SPEC §7.2, §12) ═════════════════════════════
@@ -1077,13 +1269,6 @@ contract SettlementOracleTest is SettlementBaseTest {
         oracle.referencePrice(address(vault));
         vm.expectRevert(abi.encodeWithSelector(SettlementOracle.VaultNotRegistered.selector, alice));
         oracle.referencePrice(alice);
-    }
-
-    function test_lastChainlink() public view {
-        (uint80 id, uint256 answer, uint256 updatedAt) = oracle.lastChainlink(address(vault));
-        assertEq(id, feed.roundId(1, nextAgg - 1));
-        assertEq(answer, PRICE);
-        assertLe(updatedAt, block.timestamp);
     }
 
     // ═════════════════════════════ misc ═════════════════════════════

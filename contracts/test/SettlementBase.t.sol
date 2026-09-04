@@ -48,6 +48,11 @@ abstract contract SettlementBaseTest is AuctionBaseTest {
     function setUp() public virtual override {
         super.setUp(); // ends at MONDAY_1400
         pool = new MockUniswapV3Pool(address(usdg), address(stock), 500, TICK_200, POOL_LIQ, uint32(START_TS));
+        // Chainlink: phase 1, one round every 4 h from START_TS up to now. Seeded before `registerVault`, which
+        // probes the feed's first round (D-057).
+        for (uint256 t = START_TS; t <= block.timestamp; t += FEED_PERIOD) {
+            _feedRoundAt(t, PRICE);
+        }
         vm.startPrank(admin);
         rm.setSettlementOracle(address(oracle));
         rm.setGuardian(guardianHot, true);
@@ -57,10 +62,6 @@ abstract contract SettlementBaseTest is AuctionBaseTest {
         cap.setPriceSource(address(oracle));
         vm.stopPrank();
 
-        // Chainlink: phase 1, one round every 4 h from START_TS up to now.
-        for (uint256 t = START_TS; t <= block.timestamp; t += FEED_PERIOD) {
-            _feedRoundAt(t, PRICE);
-        }
         // Pool: one swap per hour at the $200 tick so the buffer covers every window.
         for (uint256 t = START_TS + 1 hours; t <= block.timestamp; t += 1 hours) {
             pool.write(uint32(t), TICK_200, POOL_LIQ);

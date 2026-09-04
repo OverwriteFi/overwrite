@@ -6,7 +6,7 @@ import {SettlementOracle} from "../src/SettlementOracle.sol";
 import {ISettlementOracle} from "../src/interfaces/ISettlementOracle.sol";
 import {ICoveredCallVault} from "../src/interfaces/ICoveredCallVault.sol";
 import {OracleMath} from "../src/libraries/OracleMath.sol";
-import {SeriesKind, SeriesState} from "../src/Types.sol";
+import {SeriesKind, SeriesState, VaultState} from "../src/Types.sol";
 
 /// @dev Fuzz tests for the settlement policy and the payout formula (SPEC §7.1, §9; THREAT-MODEL T-01, T-09, T-10).
 contract SettlementOracleFuzzTest is SettlementBaseTest {
@@ -152,6 +152,35 @@ contract SettlementOracleFuzzTest is SettlementBaseTest {
         assertEq(p, OracleMath.clamp(answer, lo, hi));
         assertEq(vault.series(id).settlementPath, 5);
         assertLe(vault.series(id).payoutPerOption, _refPpo(hi, K_DEFAULT), "bounded extraction (D-022)");
+    }
+
+    /// D-057 (review finding 1): whatever run of invalid rounds the feed emits before expiry, an expired series is
+    /// always actionable once the backstop is open — `settle` or `halt` succeeds — so collateral is never locked.
+    function testFuzz_T14_garbageRunNeverBricksTheVault(uint8 n) public {
+        n = uint8(bound(n, 0, 45));
+        uint256 id = _liveWeekday();
+        uint64 e = vault.series(id).expiry;
+        uint80 good = _feedRoundAt(e - 3 hours, PRICE);
+        for (uint256 i; i < n; ++i) {
+            _feedRoundAt(e - 3 hours + 60 * (i + 1), 0);
+        }
+        vm.warp(uint256(e) + 7 days);
+        ISettlementOracle.Hint memory h = _hint(n < 32 ? good : 0);
+        bool okSettle;
+        try oracle.previewSettle(id, h) returns (bool ok, uint256, uint8, bytes32) {
+            okSettle = ok;
+        } catch {}
+        (bool okHalt,) = oracle.canHalt(id, h);
+        assertTrue(okSettle || okHalt, "expired series must be settleable or haltable");
+        if (okSettle) {
+            oracle.settle(id, h);
+        } else {
+            oracle.halt(id, h);
+            uint80 after_ = _feedRoundAt(uint256(e) + 7 days, PRICE);
+            oracle.resolveHaltedByOracle(id, after_, 0);
+        }
+        assertEq(uint8(vault.state()), uint8(VaultState.IDLE), "vault returns to IDLE");
+        assertEq(vault.encumbered(), 0);
     }
 
     /// D-015: `twapUSD = twapUSDG × usdgUsd / 1e8`, rounded down, for every in-band peg read.

@@ -23,7 +23,8 @@ contract MockUniswapV3Pool is IUniswapV3Pool {
     int24 public tick;
     uint128 public liquidity;
     uint16 public observationIndex;
-    uint16 public observationCardinality;
+    uint16 public observationCardinality; // grown, as in v3: 1 until the buffer wraps into the reserved capacity
+    uint16 public capacity; // observationCardinalityNext
     uint16 public count; // initialized entries
     bool public dead;
     mapping(uint256 => Observation) internal _obs;
@@ -34,7 +35,8 @@ contract MockUniswapV3Pool is IUniswapV3Pool {
         fee = fee_;
         tick = initialTick;
         liquidity = liquidity_;
-        observationCardinality = 1000;
+        observationCardinality = 1;
+        capacity = 1000;
         _obs[0] = Observation({
             blockTimestamp: ts, tickCumulative: 0, secondsPerLiquidityCumulativeX128: 0, initialized: true
         });
@@ -45,7 +47,8 @@ contract MockUniswapV3Pool is IUniswapV3Pool {
 
     function setCardinality(uint16 c) external {
         require(count == 1 && c >= 1, "set before writes");
-        observationCardinality = c;
+        capacity = c;
+        observationCardinality = 1;
     }
 
     function setDead(bool d) external {
@@ -59,7 +62,13 @@ contract MockUniswapV3Pool is IUniswapV3Pool {
         require(ts >= last.blockTimestamp, "past");
         if (ts > last.blockTimestamp) {
             uint32 dt = ts - last.blockTimestamp;
-            uint16 next = (observationIndex + 1) % observationCardinality;
+            // v3 `Oracle.write`: cardinality jumps to cardinalityNext on the write that fills the current ring.
+            uint16 card = observationCardinality;
+            if (capacity > card && observationIndex == card - 1) {
+                card = capacity;
+                observationCardinality = card;
+            }
+            uint16 next = (observationIndex + 1) % card;
             _obs[next] = Observation({
                 blockTimestamp: ts,
                 tickCumulative: last.tickCumulative + int56(tick) * int56(uint56(dt)),
@@ -68,7 +77,7 @@ contract MockUniswapV3Pool is IUniswapV3Pool {
                 initialized: true
             });
             observationIndex = next;
-            if (count < observationCardinality) count++;
+            if (count < card) count++;
         }
         tick = newTick;
         liquidity = liquidityAfter;
@@ -99,15 +108,7 @@ contract MockUniswapV3Pool is IUniswapV3Pool {
         )
     {
         if (dead) revert("dead");
-        return (
-            TickMath.getSqrtRatioAtTick(tick),
-            tick,
-            observationIndex,
-            observationCardinality,
-            observationCardinality,
-            0,
-            true
-        );
+        return (TickMath.getSqrtRatioAtTick(tick), tick, observationIndex, observationCardinality, capacity, 0, true);
     }
 
     function observations(uint256 index)

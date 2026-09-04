@@ -53,7 +53,7 @@ contract CoveredCallVaultFuzzTest is BaseTest {
         assertEq(got, pr);
     }
 
-    function testFuzz_inflationAttack_unprofitable(uint256 donation, uint256 victim) public {
+    function testFuzz_T06_inflationAttackUnprofitable(uint256 donation, uint256 victim) public {
         // attacker deposits 1 wei, donates, victim deposits; attacker never ends with more than deposited+donated
         donation = bound(donation, 1, 1_000e18);
         victim = bound(victim, 1, 1_000e18);

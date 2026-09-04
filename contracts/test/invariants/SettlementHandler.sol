@@ -275,19 +275,18 @@ contract SettlementHandler is Test {
     }
 
     function _resolve(uint256 id, uint256 seed) internal {
-        (bool ok,) = oracle.canResolveByOracle(id);
         ISettlementOracle.Hint memory h = _hint(vault.series(id).expiry);
-        if (ok && h.afterRoundId != 0) {
-            (, int256 a,,,) = feed.getRoundData(h.afterRoundId);
-            if (a > 0) {
-                _snapshotBeforeSettle(id);
-                try oracle.resolveHaltedByOracle(id, h.afterRoundId, h.afterPrevRoundId) {
-                    _recordSettle(id, 5, vault.series(id).settlementPrice);
-                } catch {
-                    resolveFailures++;
-                }
-                return;
+        // `previewResolveByOracle` mirrors the call exactly (D-057): whenever it says ok the call must succeed, so a
+        // revert here is a liveness violation rather than a guarded no-op.
+        (bool ok,) = oracle.previewResolveByOracle(id, h.afterRoundId, h.afterPrevRoundId);
+        if (ok) {
+            _snapshotBeforeSettle(id);
+            try oracle.resolveHaltedByOracle(id, h.afterRoundId, h.afterPrevRoundId) {
+                _recordSettle(id, 5, vault.series(id).settlementPrice);
+            } catch {
+                resolveFailures++;
             }
+            return;
         }
         if (seed % 3 == 0) {
             (uint256 lo, uint256 hi) = oracle.resolutionBand(id);
@@ -300,6 +299,19 @@ contract SettlementHandler is Test {
                 resolveFailures++;
             }
         }
+    }
+
+    /// @dev Composite lifecycle action (the `AuctionHandler.fullCycle` pattern): open, fill, clear, let the feed and
+    /// the pool move, then settle / halt / resolve. Without it a random run of depth 32 rarely reaches a settlement
+    /// and the per-series invariants assert nothing.
+    function cycle(uint256 seed) external count {
+        if (vault.state() == VaultState.IDLE) {
+            if (seed % 2 == 0) this.openWeekday(seed);
+            else this.openWeekend(seed);
+        }
+        this.clear(seed >> 8);
+        this.settle(seed >> 16);
+        this.claim(seed >> 32);
     }
 
     function claim(uint256 seed) external count {
@@ -320,13 +332,20 @@ contract SettlementHandler is Test {
 
     // ═════════════════════════════ environment ═════════════════════════════
 
-    /// @dev Chainlink operator: a new round at now, ±40 % drift, 5 % garbage answers, 3 % phase bumps.
+    /// @dev Chainlink operator: a new round at now, ±40 % drift, 3 % phase bumps, and 5 % of calls emit a run of
+    /// up to 12 rounds with `answer = 0` (D-057: the hint verifier tolerates runs up to MAX_GARBAGE_SKIP).
     function postRound(uint256 seed) external count {
         int256 answer = lastAnswer * int256(bound(seed, 60, 140)) / 100;
-        if (seed % 100 < 5) answer = 0;
         if (seed % 100 >= 5 && seed % 100 < 8) {
             phase++;
             nextAgg = 1;
+        }
+        if (seed % 100 < 5) {
+            uint256 n = bound(seed >> 8, 1, 12);
+            for (uint256 i; i < n; ++i) {
+                _postRound(block.timestamp, 0);
+            }
+            return;
         }
         _postRound(block.timestamp, answer);
     }
@@ -606,6 +625,11 @@ contract SettlementHandler is Test {
 
     function ghost(uint256 id) external view returns (Ghost memory) {
         return ghosts[id];
+    }
+
+    /// @dev The hint an honest keeper would build from on-chain data, for the liveness invariant.
+    function hintFor(uint64 expiry) external view returns (ISettlementOracle.Hint memory) {
+        return _hint(expiry);
     }
 
     function seriesCount() external view returns (uint256) {

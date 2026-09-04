@@ -79,6 +79,7 @@ contract RiskModule is Ownable2Step, AccessControl, IRiskModule {
     error NotSettlementOracle();
     error NotGuardian();
     error OutOfBounds(bytes32 key);
+    error RenounceDisabled();
 
     event Paused(address indexed vault, bytes32 indexed what, address indexed by);
     event Unpaused(address indexed vault, bytes32 indexed what, address indexed by);
@@ -166,6 +167,12 @@ contract RiskModule is Ownable2Step, AccessControl, IRiskModule {
         uint64 from = uint64(block.timestamp) + 1;
         _versions[vault].push(ParamsVersion({effectiveFrom: from, params: p}));
         emit OracleParamsSet(vault, _versions[vault].length - 1, from, p);
+    }
+
+    /// @notice Disabled: the owner is the timelock and the parameter setters must stay reachable (CLAUDE.md rule 5,
+    /// D-057).
+    function renounceOwnership() public view override onlyOwner {
+        revert RenounceDisabled();
     }
 
     // ═════════════════════════════ views ═════════════════════════════

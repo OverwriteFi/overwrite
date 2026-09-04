@@ -58,9 +58,16 @@ contract SettlementOracle is Ownable2Step, ReentrancyGuard, IPriceSource, ISettl
     uint256 public constant REF_MAX_STALE = 26 hours; // §7.2
     uint256 public constant REF_TWAP_BOUND_BPS = 1_500; // §7.2
     uint32 public constant MAX_LAST_OBS_AGE = 900; // D-019
-    uint256 internal constant MAX_GARBAGE_SKIP = 8; // rounds with answer <= 0 tolerated after refRound
-    uint80 public constant FIRST_ROUND = (uint80(1) << 64) | 1;
+    /// @dev Rounds with `answer <= 0` skipped when locating the last valid round before expiry or the first valid
+    /// round after it. A run longer than this makes the hinted round unverifiable; the 7-day halt backstop is the
+    /// escape (D-057).
+    uint256 internal constant MAX_GARBAGE_SKIP = 32;
+    /// @dev Phases probed at registration for the feed's earliest reachable round (D-057).
+    uint80 internal constant MAX_PHASE_PROBE = 8;
     uint24 internal constant POOL_FEE = 500;
+    /// @dev Largest `multiplierAtOpen / uiMultiplier()` ratio the jump-guard exception evaluates (D-057): beyond it
+    /// the adjusted price is meaningless and the guard fails instead of reverting on overflow.
+    uint256 internal constant MAX_MULTIPLIER_RATIO = 1e12;
     uint256 internal constant BPS = 1e4;
 
     bytes32 public constant NO_ORACLE_PATH = "NO_ORACLE_PATH";
@@ -139,6 +146,7 @@ contract SettlementOracle is Ownable2Step, ReentrancyGuard, IPriceSource, ISettl
     error OraclePaused();
     error InvalidRound(uint80 roundId);
     error NoReferencePrice();
+    error RenounceDisabled();
 
     // ───────────────────────────── events ─────────────────────────────
 
@@ -183,6 +191,8 @@ contract SettlementOracle is Ownable2Step, ReentrancyGuard, IPriceSource, ISettl
         bool stockIsToken1;
         if (p.token0() == usdg && p.token1() == address(stock)) stockIsToken1 = true;
         else if (p.token0() != address(stock) || p.token1() != usdg) revert PoolTokenMismatch();
+        uint80 firstRound = _discoverFirstRound(AggregatorV3Interface(feed));
+        if (firstRound == 0) revert Miswired("FEED_FIRST_ROUND");
         _vaults[vault] = VaultConfig({
             feed: AggregatorV3Interface(feed),
             pool: p,
@@ -190,9 +200,16 @@ contract SettlementOracle is Ownable2Step, ReentrancyGuard, IPriceSource, ISettl
             stockIsToken1: stockIsToken1,
             stockDecimals: stock.decimals(),
             usdgDecimals: IERC20Metadata(usdg).decimals(),
-            registered: true
+            registered: true,
+            firstRound: firstRound
         });
         emit VaultRegistered(vault, feed, pool, stockIsToken1);
+    }
+
+    /// @notice Disabled: the owner is the timelock and `resolveHalted` / `registerVault` must stay reachable
+    /// (CLAUDE.md rule 5, D-057).
+    function renounceOwnership() public view override onlyOwner {
+        revert RenounceDisabled();
     }
 
     // ═════════════════════════════ settlement (permissionless) ═════════════════════════════
@@ -254,12 +271,12 @@ contract SettlementOracle is Ownable2Step, ReentrancyGuard, IPriceSource, ISettl
         uint64 unlockAt = c.expiry + HALTED_TIMEOUT;
         if (block.timestamp < unlockAt) revert TooEarly(unlockAt);
         if (c.cfg.stock.oraclePaused()) revert OraclePaused();
-        Round memory r = _round(c.cfg.feed, roundId);
-        if (!_isFirstAfter(c.cfg.feed, r, prevRoundId, c.expiry)) revert BadAfterRoundHint(roundId);
+        (Round memory r, bool positionOk) = _firstValidAfter(c.cfg.feed, roundId, prevRoundId, c.expiry);
+        if (!positionOk) revert BadAfterRoundHint(roundId);
         if (r.answer == 0) revert InvalidRound(roundId);
         uint256 clamped = OracleMath.clamp(r.answer, lo, hi);
-        _finish(c, 5, clamped, roundId);
-        emit SeriesResolvedByOracle(seriesId, r.answer, clamped, roundId);
+        _finish(c, 5, clamped, r.id);
+        emit SeriesResolvedByOracle(seriesId, r.answer, clamped, r.id);
     }
 
     // ═════════════════════════════ price source (SPEC §7.2, §12) ═════════════════════════════
@@ -339,6 +356,8 @@ contract SettlementOracle is Ownable2Step, ReentrancyGuard, IPriceSource, ISettl
     }
 
     /// @inheritdoc ISettlementOracle
+    /// @dev Coarse window signal: halted, past the timeout, token oracle live and the feed has published after
+    /// expiry. Whether a specific hint settles is `previewResolveByOracle` (D-057).
     function canResolveByOracle(uint256 seriesId) external view returns (bool ok, uint64 unlockAt) {
         Ctx memory c = _load(seriesId);
         unlockAt = c.expiry + HALTED_TIMEOUT;
@@ -346,6 +365,21 @@ contract SettlementOracle is Ownable2Step, ReentrancyGuard, IPriceSource, ISettl
         if (block.timestamp < unlockAt || c.cfg.stock.oraclePaused()) return (false, unlockAt);
         Round memory l = _latest(c.cfg.feed);
         ok = l.exists && l.updatedAt > c.expiry;
+    }
+
+    /// @inheritdoc ISettlementOracle
+    function previewResolveByOracle(uint256 seriesId, uint80 roundId, uint80 prevRoundId)
+        external
+        view
+        returns (bool ok, uint256 price8)
+    {
+        Ctx memory c = _load(seriesId);
+        if (c.state != SeriesState.HALTED || !_records[seriesId].halted) return (false, 0);
+        if (block.timestamp < c.expiry + HALTED_TIMEOUT || c.cfg.stock.oraclePaused()) return (false, 0);
+        (Round memory r, bool positionOk) = _firstValidAfter(c.cfg.feed, roundId, prevRoundId, c.expiry);
+        if (!positionOk || r.answer == 0) return (false, 0);
+        (uint256 lo, uint256 hi) = resolutionBand(seriesId);
+        return (true, OracleMath.clamp(r.answer, lo, hi));
     }
 
     /// @inheritdoc ISettlementOracle
@@ -365,28 +399,6 @@ contract SettlementOracle is Ownable2Step, ReentrancyGuard, IPriceSource, ISettl
     /// @inheritdoc ISettlementOracle
     function vaultConfig(address vault) external view returns (VaultConfig memory) {
         return _vaults[vault];
-    }
-
-    /// @notice Keeper helper: is `roundId` the last valid round with `updatedAt <= timestamp` (SPEC §9.1)?
-    function isLastRoundAtOrBefore(address vault, uint80 roundId, uint64 timestamp) external view returns (bool) {
-        AggregatorV3Interface feed = _vaults[vault].feed;
-        return _isLastValidAtOrBefore(feed, _round(feed, roundId), timestamp);
-    }
-
-    /// @notice Keeper helper: is `roundId` the first round with `updatedAt > timestamp` (SPEC §9.3)?
-    function isFirstRoundAfter(address vault, uint80 roundId, uint80 prevRoundId, uint64 timestamp)
-        external
-        view
-        returns (bool)
-    {
-        AggregatorV3Interface feed = _vaults[vault].feed;
-        return _isFirstAfter(feed, _round(feed, roundId), prevRoundId, timestamp);
-    }
-
-    /// @notice Latest Chainlink round of the vault's feed; `answer` is 0 for a non-positive or unreachable round.
-    function lastChainlink(address vault) external view returns (uint80 roundId, uint256 answer, uint256 updatedAt) {
-        Round memory l = _latest(_vaults[vault].feed);
-        return (l.id, l.answer, l.updatedAt);
     }
 
     // ═════════════════════════════ internals: evaluation ═════════════════════════════
@@ -457,34 +469,62 @@ contract SettlementOracle is Ownable2Step, ReentrancyGuard, IPriceSource, ISettl
 
     function _path3(Ctx memory c, Hint calldata h) internal view returns (uint256 price8, bytes32 reason, uint80) {
         if (h.afterRoundId == 0) return (0, "NO_ROUND", 0);
-        Round memory r = _round(c.cfg.feed, h.afterRoundId);
-        if (!_isFirstAfter(c.cfg.feed, r, h.afterPrevRoundId, c.expiry)) revert BadAfterRoundHint(h.afterRoundId);
+        (Round memory r, bool positionOk) = _firstValidAfter(c.cfg.feed, h.afterRoundId, h.afterPrevRoundId, c.expiry);
+        if (!positionOk) revert BadAfterRoundHint(h.afterRoundId);
         if (r.answer == 0) return (0, "INVALID_ANSWER", 0);
         if (r.updatedAt > c.expiry + WEEKEND_CL_DEADLINE) return (0, "DEADLINE", 0);
         if (!_jumpOk(c, r.answer)) return (r.answer, JUMP_GUARD, 0);
         return (r.answer, 0, r.id);
     }
 
-    /// @dev SPEC §9.6 exhaustion proofs (D-053). Returns the verified `refRound` so `halt` can fix `resolveRef`.
+    /// @dev SPEC §9.6 exhaustion proofs (D-053, tightened by D-057). Returns the reference round so `halt` can fix
+    /// `resolveRef`. Two rules make this both live and non-pre-emptive:
+    /// - from `expiry + HALTED_TIMEOUT` no hint failure reverts and an unusable hint counts as "no path", so a series
+    ///   whose hints have become unverifiable (a long run of invalid rounds, a dead feed, a permanent `oraclePaused`)
+    ///   can always be halted and then resolved;
+    /// - the backstop never pre-empts a path that still succeeds with the supplied hint, so a keeper outage cannot be
+    ///   turned into a different settlement price by whoever calls first.
     function _haltCheck(Ctx memory c, Hint calldata h) internal view returns (bool, bytes32, Round memory ref) {
         if (c.state != SeriesState.LIVE) return (false, "NOT_LIVE", ref);
         if (block.timestamp <= c.expiry) return (false, "NOT_EXPIRED", ref);
-        ref = _verifyRefRound(c, h.refRoundId);
-        if (block.timestamp >= c.expiry + HALTED_TIMEOUT) return (true, NO_ORACLE_PATH, ref);
-        if (c.cfg.stock.oraclePaused()) return (false, "ORACLE_PAUSED", ref);
-        if (!_sequencerOk(c.params)) return (false, "SEQUENCER_DOWN", ref);
-        if (c.kind == SeriesKind.WEEKDAY) {
-            if (block.timestamp <= c.expiry + c.params.twapGrace) return (false, "TWAP_GRACE_OPEN", ref);
-            if (!ref.exists || c.expiry - ref.updatedAt > c.params.weekdayMaxStale) return (true, NO_ORACLE_PATH, ref);
-            if (!_jumpOk(c, ref.answer)) return (true, JUMP_GUARD, ref);
-            return (false, "PATH_AVAILABLE", ref);
+        bool backstop = block.timestamp >= c.expiry + HALTED_TIMEOUT;
+        bool refOk;
+        (ref, refOk) = _tryRefRound(c, h.refRoundId);
+        if (!refOk && !backstop) {
+            if (h.refRoundId == 0) revert RefRoundRequired();
+            revert BadRefRoundHint(h.refRoundId);
         }
+        if (c.cfg.stock.oraclePaused()) {
+            return (backstop, backstop ? NO_ORACLE_PATH : bytes32("ORACLE_PAUSED"), ref);
+        }
+        if (!_sequencerOk(c.params)) {
+            return (backstop, backstop ? NO_ORACLE_PATH : bytes32("SEQUENCER_DOWN"), ref);
+        }
+        if (c.kind == SeriesKind.WEEKDAY) return _haltCheckWeekday(c, ref);
+        return _haltCheckWeekend(c, h, ref, backstop);
+    }
+
+    function _haltCheckWeekday(Ctx memory c, Round memory ref) internal view returns (bool, bytes32, Round memory) {
+        if (block.timestamp <= c.expiry + c.params.twapGrace) return (false, "TWAP_GRACE_OPEN", ref);
+        if (!ref.exists || c.expiry - ref.updatedAt > c.params.weekdayMaxStale) return (true, NO_ORACLE_PATH, ref);
+        if (!_jumpOk(c, ref.answer)) return (true, JUMP_GUARD, ref);
+        return (false, "PATH_AVAILABLE", ref);
+    }
+
+    function _haltCheckWeekend(Ctx memory c, Hint calldata h, Round memory ref, bool backstop)
+        internal
+        view
+        returns (bool, bytes32, Round memory)
+    {
         if (block.timestamp <= c.expiry + WEEKEND_CL_DEADLINE) return (false, "DEADLINE_OPEN", ref);
         Round memory latest = _latest(c.cfg.feed);
         if (!latest.exists || latest.updatedAt <= c.expiry) return (true, NO_ORACLE_PATH, ref);
-        if (h.afterRoundId == 0) return (false, "AFTER_HINT_REQUIRED", ref);
-        Round memory r = _round(c.cfg.feed, h.afterRoundId);
-        if (!_isFirstAfter(c.cfg.feed, r, h.afterPrevRoundId, c.expiry)) revert BadAfterRoundHint(h.afterRoundId);
+        if (h.afterRoundId == 0) return (backstop, backstop ? NO_ORACLE_PATH : bytes32("AFTER_HINT_REQUIRED"), ref);
+        (Round memory r, bool positionOk) = _firstValidAfter(c.cfg.feed, h.afterRoundId, h.afterPrevRoundId, c.expiry);
+        if (!positionOk) {
+            if (backstop) return (true, NO_ORACLE_PATH, ref);
+            revert BadAfterRoundHint(h.afterRoundId);
+        }
         if (r.answer == 0 || r.updatedAt > c.expiry + WEEKEND_CL_DEADLINE) return (true, NO_ORACLE_PATH, ref);
         if (!_jumpOk(c, r.answer)) return (true, JUMP_GUARD, ref);
         return (false, "PATH_AVAILABLE", ref);
@@ -509,9 +549,13 @@ contract SettlementOracle is Ownable2Step, ReentrancyGuard, IPriceSource, ISettl
     /// @dev D-025 as clarified by D-051: the plain check OR, when `uiMultiplier` changed since open, the
     /// multiplier-adjusted check (`S × multiplierAtOpen / m_now`). `oraclePaused()` is checked by the caller.
     function _jumpOk(Ctx memory c, uint256 price8) internal view returns (bool) {
+        if (price8 > type(uint128).max) return false; // a settlement price must fit the vault's uint128 field
         if (OracleMath.withinBps(price8, c.sRef, c.params.jumpBps)) return true;
         uint256 mNow = c.cfg.stock.uiMultiplier();
         if (mNow == 0 || mNow == c.multiplierAtOpen) return false;
+        // Bound the ratio so the adjusted price cannot overflow: a corporate action never scales the multiplier by
+        // more than MAX_MULTIPLIER_RATIO, and an absurd `uiMultiplier` must fail the guard, not revert it (D-057).
+        if (c.multiplierAtOpen > mNow * MAX_MULTIPLIER_RATIO) return false;
         return OracleMath.withinBps(Math.mulDiv(price8, c.multiplierAtOpen, mNow), c.sRef, c.params.jumpBps);
     }
 
@@ -521,7 +565,8 @@ contract SettlementOracle is Ownable2Step, ReentrancyGuard, IPriceSource, ISettl
         try AggregatorV3Interface(p.sequencerFeed).latestRoundData() returns (
             uint80, int256 answer, uint256 startedAt, uint256, uint80
         ) {
-            return answer == 0 && startedAt != 0 && block.timestamp - startedAt >= p.sequencerGrace;
+            if (answer != 0 || startedAt == 0 || startedAt > block.timestamp) return false; // future startedAt = down
+            return block.timestamp - startedAt >= p.sequencerGrace;
         } catch {
             return false;
         }
@@ -562,7 +607,8 @@ contract SettlementOracle is Ownable2Step, ReentrancyGuard, IPriceSource, ISettl
     }
 
     /// @dev `r` is valid, at or before `ts`, and every later round at or before `ts` is invalid (answer ≤ 0),
-    /// checked over at most `MAX_GARBAGE_SKIP` successors.
+    /// checked over at most `MAX_GARBAGE_SKIP` successors. A longer run of invalid rounds leaves every hint
+    /// unverifiable; `halt`'s backstop is the escape (D-057).
     function _isLastValidAtOrBefore(AggregatorV3Interface feed, Round memory r, uint256 ts)
         internal
         view
@@ -599,16 +645,65 @@ contract SettlementOracle is Ownable2Step, ReentrancyGuard, IPriceSource, ISettl
         return _next(feed, prevHint).id == r.id;
     }
 
-    /// @dev D-021 / D-053: `refRoundId == 0` is accepted only when the feed's first round is after expiry or the
-    /// feed is unreachable; otherwise the hint must be the last valid round at or before expiry.
-    function _verifyRefRound(Ctx memory c, uint80 refRoundId) internal view returns (Round memory ref) {
-        if (refRoundId == 0) {
-            Round memory first = _round(c.cfg.feed, FIRST_ROUND);
-            if (first.exists && first.updatedAt <= c.expiry) revert RefRoundRequired();
-            return ref;
+    /// @dev The first round after `ts` with a positive answer: `hintRound` must be the first round after `ts` by
+    /// position, then at most `MAX_GARBAGE_SKIP` successors with `answer <= 0` are skipped (SPEC §9.6 says "the
+    /// first **valid** round"; D-057). `positionOk == false` means the hint is wrong; `r.answer == 0` means the
+    /// position was right but no valid round follows within the skip bound.
+    function _firstValidAfter(AggregatorV3Interface feed, uint80 hintRound, uint80 prevHint, uint256 ts)
+        internal
+        view
+        returns (Round memory r, bool positionOk)
+    {
+        r = _round(feed, hintRound);
+        if (!_isFirstAfter(feed, r, prevHint, ts)) {
+            Round memory none;
+            return (none, false);
         }
-        ref = _round(c.cfg.feed, refRoundId);
-        if (!_isLastValidAtOrBefore(c.cfg.feed, ref, c.expiry)) revert BadRefRoundHint(refRoundId);
+        for (uint256 i; i < MAX_GARBAGE_SKIP; ++i) {
+            if (r.answer > 0) return (r, true);
+            Round memory n = _next(feed, r.id);
+            if (!n.exists) return (n, true);
+            r = n;
+        }
+        Round memory exhausted;
+        return (exhausted, true);
+    }
+
+    /// @dev D-021 / D-053 / D-057. Never reverts. `ok` is false when the hint is not the last valid round at or
+    /// before expiry, or when a zero hint's "no valid round exists" claim is contradicted on-chain — by the feed's
+    /// registration-time first round being at or before expiry, or by its own latest round being a valid one at or
+    /// before expiry. Residual (documented, D-057): if the first round has since become unreadable AND the feed has
+    /// published after expiry, the claim cannot be disproved on-chain; the consequence is bounded to halting the
+    /// series with `resolveRef = sRef` and the ±25 % resolution band.
+    function _tryRefRound(Ctx memory c, uint80 refRoundId) internal view returns (Round memory ref, bool ok) {
+        if (refRoundId == 0) {
+            Round memory first = _round(c.cfg.feed, c.cfg.firstRound);
+            if (first.exists && first.updatedAt <= c.expiry) return (ref, false);
+            Round memory latest = _latest(c.cfg.feed);
+            if (latest.exists && latest.answer > 0 && latest.updatedAt <= c.expiry) return (ref, false);
+            return (ref, true);
+        }
+        Round memory r = _round(c.cfg.feed, refRoundId);
+        if (_isLastValidAtOrBefore(c.cfg.feed, r, c.expiry)) return (r, true);
+        return (ref, false);
+    }
+
+    function _verifyRefRound(Ctx memory c, uint80 refRoundId) internal view returns (Round memory ref) {
+        bool ok;
+        (ref, ok) = _tryRefRound(c, refRoundId);
+        if (ok) return ref;
+        if (refRoundId == 0) revert RefRoundRequired();
+        revert BadRefRoundHint(refRoundId);
+    }
+
+    /// @dev The feed's earliest reachable round `(phase << 64) | 1`, probed over the first `MAX_PHASE_PROBE` phases
+    /// at registration (D-057). Returns 0 when the feed serves no round, which makes `registerVault` revert.
+    function _discoverFirstRound(AggregatorV3Interface feed) internal view returns (uint80) {
+        for (uint80 p = 1; p <= MAX_PHASE_PROBE; ++p) {
+            uint80 id = (p << 64) | 1;
+            if (_round(feed, id).exists) return id;
+        }
+        return 0;
     }
 
     // ═════════════════════════════ internals: TWAP ═════════════════════════════

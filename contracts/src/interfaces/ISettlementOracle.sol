@@ -29,6 +29,9 @@ interface ISettlementOracle {
         uint8 stockDecimals;
         uint8 usdgDecimals;
         bool registered;
+        /// @dev The feed's earliest reachable round, probed at registration. A "no round at or before expiry"
+        /// claim (`refRoundId == 0`) is checked against this round, not a fixed guess (D-057).
+        uint80 firstRound;
     }
 
     struct SeriesRecord {
@@ -52,8 +55,15 @@ interface ISettlementOracle {
         returns (bool ok, uint256 price8, uint8 path, bytes32 reason);
     function canHalt(uint256 seriesId, Hint calldata hint) external view returns (bool ok, bytes32 reason);
     function canResolveByOracle(uint256 seriesId) external view returns (bool ok, uint64 unlockAt);
+    /// @notice Exact mirror of `resolveHaltedByOracle` for the given hint: `ok` is true only when the call would
+    /// succeed, and `price8` is the clamped price it would settle at (D-057).
+    function previewResolveByOracle(uint256 seriesId, uint80 roundId, uint80 prevRoundId)
+        external
+        view
+        returns (bool ok, uint256 price8);
     function resolutionBand(uint256 seriesId) external view returns (uint256 lo, uint256 hi);
     function referencePrice(address vault) external view returns (uint256 price8, bytes32 source);
+    function twap(address vault, uint32 window) external view returns (uint256 usdg8, uint256 usd8, bytes32 reason);
     function records(uint256 seriesId) external view returns (SeriesRecord memory);
     function vaultConfig(address vault) external view returns (VaultConfig memory);
 }

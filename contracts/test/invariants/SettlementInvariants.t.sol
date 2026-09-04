@@ -4,6 +4,7 @@ pragma solidity 0.8.26;
 import {SettlementBaseTest} from "../SettlementBase.t.sol";
 import {SettlementHandler} from "./SettlementHandler.sol";
 import {ICoveredCallVault} from "../../src/interfaces/ICoveredCallVault.sol";
+import {ISettlementOracle} from "../../src/interfaces/ISettlementOracle.sol";
 import {OracleMath} from "../../src/libraries/OracleMath.sol";
 import {OracleParams, SeriesKind, SeriesState, VaultState} from "../../src/Types.sol";
 
@@ -43,7 +44,7 @@ contract SettlementInvariants is SettlementBaseTest {
             deps
         );
         targetContract(address(h));
-        bytes4[] memory sel = new bytes4[](12);
+        bytes4[] memory sel = new bytes4[](13);
         sel[0] = h.openWeekday.selector;
         sel[1] = h.openWeekend.selector;
         sel[2] = h.bid.selector;
@@ -56,6 +57,7 @@ contract SettlementInvariants is SettlementBaseTest {
         sel[9] = h.split.selector;
         sel[10] = h.guardian.selector;
         sel[11] = h.setParams.selector;
+        sel[12] = h.cycle.selector;
         targetSelector(FuzzSelector({addr: address(h), selectors: sel}));
         bytes4[] memory w = new bytes4[](1);
         w[0] = h.warp.selector;
@@ -105,6 +107,7 @@ contract SettlementInvariants is SettlementBaseTest {
 
     /// I-5: never stale. Path 1 only within `weekdayMaxStale` of expiry; weekend series never settle on a round at
     /// or before expiry; path 3 rounds are after expiry.
+    /// forge-config: default.invariant.depth = 64
     function invariant_I5_neverStale() public view {
         for (uint256 i; i < h.seriesCount(); ++i) {
             uint256 id = h.seriesIds(i);
@@ -125,11 +128,13 @@ contract SettlementInvariants is SettlementBaseTest {
     }
 
     /// I-7: guardian calls write only pause flags.
+    /// forge-config: default.invariant.depth = 64
     function invariant_I7_guardianScope() public view {
         assertEq(h.guardianViolations(), 0, "I-7");
     }
 
     /// I-9: path 2 settlements used an in-band, fresh USDG/USD read.
+    /// forge-config: default.invariant.depth = 64
     function invariant_I9_usdgBand() public view {
         for (uint256 i; i < h.seriesCount(); ++i) {
             uint256 id = h.seriesIds(i);
@@ -143,6 +148,7 @@ contract SettlementInvariants is SettlementBaseTest {
     }
 
     /// I-10: every path 1–3 price is within `jumpBps` of `sRef`, or the multiplier-adjusted price is.
+    /// forge-config: default.invariant.depth = 64
     function invariant_I10_jumpGuard() public view {
         for (uint256 i; i < h.seriesCount(); ++i) {
             uint256 id = h.seriesIds(i);
@@ -157,6 +163,7 @@ contract SettlementInvariants is SettlementBaseTest {
     }
 
     /// I-11: resolutions stay inside ±25 % of the resolution reference.
+    /// forge-config: default.invariant.depth = 64
     function invariant_I11_resolutionBand() public view {
         for (uint256 i; i < h.seriesCount(); ++i) {
             uint256 id = h.seriesIds(i);
@@ -168,6 +175,7 @@ contract SettlementInvariants is SettlementBaseTest {
     }
 
     /// I-12: the parameters governing a series never change after it opened.
+    /// forge-config: default.invariant.depth = 64
     function invariant_I12_paramSnapshot() public view {
         for (uint256 i; i < h.seriesCount(); ++i) {
             uint256 id = h.seriesIds(i);
@@ -176,15 +184,38 @@ contract SettlementInvariants is SettlementBaseTest {
         }
     }
 
-    /// I-14: every settle / halt / resolution the views approved succeeded, and a halted series past the timeout
-    /// with a fresh post-expiry round is always resolvable without a key.
+    /// SPEC §17 I-14, first arm (D-057): an expired series is never stuck. Once the halt backstop is open, the hint
+    /// an honest keeper builds from on-chain data must make either `settle` or `halt` succeed, and neither view may
+    /// revert. This is the invariant that a long run of invalid rounds, a dead feed or a permanent `oraclePaused`
+    /// would break.
+    /// forge-config: default.invariant.depth = 64
+    function invariant_I14_expiredSeriesActionable() public view {
+        if (vault.state() != VaultState.LIVE) return;
+        uint256 id = vault.currentSeriesId();
+        ICoveredCallVault.VaultSeries memory s = vault.series(id);
+        if (block.timestamp < uint256(s.expiry) + oracle.HALTED_TIMEOUT()) return;
+        ISettlementOracle.Hint memory hint = h.hintFor(s.expiry);
+        bool okSettle;
+        bool okHalt;
+        try oracle.previewSettle(id, hint) returns (bool ok, uint256, uint8, bytes32) {
+            okSettle = ok;
+        } catch {}
+        try oracle.canHalt(id, hint) returns (bool ok, bytes32) {
+            okHalt = ok;
+        } catch {}
+        assertTrue(okSettle || okHalt, "I-14: expired series can be neither settled nor halted");
+    }
+
+    /// I-14, second arm: every settle / halt / resolution the views approved succeeded, and a halted series past the
+    /// timeout with a fresh post-expiry round is always resolvable without a key.
+    /// forge-config: default.invariant.depth = 64
     function invariant_I14_liveness() public view {
         assertEq(h.livenessFailures(), 0, "I-14: approved call reverted");
         assertEq(h.resolveFailures(), 0, "I-14: resolution reverted");
         if (vault.state() == VaultState.HALTED) {
             uint256 id = vault.currentSeriesId();
             uint64 e = vault.series(id).expiry;
-            (, uint256 answer, uint256 upd) = oracle.lastChainlink(address(vault));
+            (, int256 answer,, uint256 upd,) = feed.latestRoundData();
             if (block.timestamp >= e + 7 days && upd > e && answer > 0 && !stock.oraclePaused()) {
                 (bool ok,) = oracle.canResolveByOracle(id);
                 assertTrue(ok, "I-14: permissionless resolution open");
@@ -194,6 +225,7 @@ contract SettlementInvariants is SettlementBaseTest {
 
     /// Payouts are bounded by the collateral encumbered for the series and by the assets at settlement; claims never
     /// exceed the reserved total; the reserve is always backed.
+    /// forge-config: default.invariant.depth = 64
     function invariant_payoutsBounded() public view {
         for (uint256 i; i < h.seriesCount(); ++i) {
             uint256 id = h.seriesIds(i);
@@ -209,12 +241,14 @@ contract SettlementInvariants is SettlementBaseTest {
     }
 
     /// `previewSettle` and `settle` agree on the price.
+    /// forge-config: default.invariant.depth = 64
     function invariant_previewMatchesSettle() public view {
         assertEq(h.previewMismatches(), 0);
     }
 
     /// A halted vault can never open a new auction (SPEC §9.6). `halt` pauses new auctions in the RiskModule and a
     /// guardian may lift that pause after review, but the vault's own state machine keeps it closed until resolved.
+    /// forge-config: default.invariant.depth = 64
     function invariant_haltedVaultCannotOpen() public view {
         if (vault.state() != VaultState.HALTED) return;
         (bool ok, bytes32 reason) = vault.canOpenAuction(uint64(block.timestamp + 5 days));
@@ -230,6 +264,7 @@ contract SettlementInvariants is SettlementBaseTest {
         invariant_I11_resolutionBand();
         invariant_I12_paramSnapshot();
         invariant_I14_liveness();
+        invariant_I14_expiredSeriesActionable();
         invariant_payoutsBounded();
         invariant_haltedVaultCannotOpen();
     }

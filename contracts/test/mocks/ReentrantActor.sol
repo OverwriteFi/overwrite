@@ -52,7 +52,16 @@ contract ReentrantActor is IERC1155Receiver {
         return selectors.length;
     }
 
-    function onERC1155Received(address, address, uint256 id, uint256, bytes calldata) external returns (bytes4) {
+    /// @dev T-16 is about re-entering *while a protocol call is on the stack*: the tokens then come from the vault
+    /// (mint) or the AuctionHouse (allocation transfer), so `operator` is one of the two. A plain holder-to-holder
+    /// transfer is not a protocol call and the calls below legitimately succeed there, so they are not counted.
+    function onERC1155Received(address operator, address, uint256 id, uint256, bytes calldata)
+        external
+        returns (bytes4)
+    {
+        if (operator != address(ah) && operator != address(vault)) {
+            return IERC1155Receiver.onERC1155Received.selector;
+        }
         _try(address(ah), abi.encodeCall(ah.withdrawRefund, (address(this))));
         _try(address(ah), abi.encodeCall(ah.claimOptions, (id, address(this))));
         _try(address(vault), abi.encodeCall(vault.claimPremium, (address(this))));

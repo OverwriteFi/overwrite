@@ -16,7 +16,7 @@ contract OracleMathTest is Test {
         assertEq(TickMath.getSqrtRatioAtTick(0), uint160(Q96), "tick 0");
         assertEq(TickMath.getSqrtRatioAtTick(TickMath.MIN_TICK), TickMath.MIN_SQRT_RATIO, "min");
         assertEq(TickMath.getSqrtRatioAtTick(TickMath.MAX_TICK), TickMath.MAX_SQRT_RATIO, "max");
-        // SPEC §9.5 check: tick 222534 → 1e12 / 1.0001^222534 ≈ 216.4 (USDG per token, stock = token1)
+        // SPEC §9.5 check: tick 222534 → 1e12 / 1.0001^222534 = 216.75 (USDG per token, stock = token1)
         uint256 p = OracleMath.quotePrice8(TickMath.getSqrtRatioAtTick(222_534), true, 18, 6);
         assertApproxEqRel(p, 216.75e8, 0.001e18, "spec check (1e12 / 1.0001^222534 = 216.75)");
     }
@@ -69,6 +69,16 @@ contract OracleMathTest is Test {
 
     function test_sqrtFactor_matchesSpecConstant() public pure {
         assertEq(OracleMath.sqrtFactor1e9(100), 1_004_987_562, "SPEC: sqrt(1.01) - 1 = 4 987 562 / 1e9");
+    }
+
+    /// @dev Independent reference: f is the floor of sqrt((1e4 + bps) * 1e14), i.e. f^2 <= x < (f+1)^2.
+    function testFuzz_sqrtFactor_isFlooredSquareRoot(uint16 bps) public pure {
+        bps = uint16(bound(bps, 0, 5_000));
+        uint256 f = OracleMath.sqrtFactor1e9(bps);
+        uint256 x = (1e4 + uint256(bps)) * 1e14;
+        assertLe(f * f, x, "f^2 <= x");
+        assertGt((f + 1) * (f + 1), x, "(f+1)^2 > x");
+        assertGe(f, 1e9, "factor >= 1");
     }
 
     /// @dev Reference: exact v3 swap amounts for a 1 % price move in the direction that raises the stock price.
