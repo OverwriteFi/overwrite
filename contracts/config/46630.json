@@ -1,0 +1,113 @@
+{
+  "_comment": "Robinhood Chain testnet. SPEC 1.8 and a cast sweep of every address in SPEC confirm that USDG, the stock tokens, the Chainlink feeds, the Uniswap v3 factory and Morpho have no code here (only Uniswap v4, Permit2 and Multicall3 do). Every external below is therefore the zero address, which is the instruction to script/MockDeployLib.sol to deploy a mock in its place. The mock addresses are recorded in deployments/46630.json, and a re-run reads them back from there and reuses them; delete that file to force a fresh set. This file is a hand-maintained input and is never written to by the deploy. See docs/RUNBOOK.md.",
+  "chainId": 46630,
+  "label": "robinhood-testnet",
+  "explorer": {
+    "url": "https://explorer.testnet.chain.robinhood.com",
+    "verifier": "blockscout",
+    "verifierUrl": "https://explorer.testnet.chain.robinhood.com/api/"
+  },
+  "governance": {
+    "_comment": "TESTNET DEVIATION: only one key is funded here, so the deployer doubles as the admin EOA, the guardian, the treasury and the keeper, and minDelay is 0 so one command can execute both timelock batches. On 4663 these are four distinct keys and minDelay is 172800. DeployChecks still asserts the deployer owns no contract and holds no WRITE; deployerIsAdmin only relaxes the timelock-role half of that assertion and makes the deviation machine-readable.",
+    "timelockMinDelay": 0,
+    "admin": "0x65A5206f9d92D92783c78C60b878A671EA1D2786",
+    "guardians": [
+      "0x65A5206f9d92D92783c78C60b878A671EA1D2786"
+    ],
+    "cancellers": [],
+    "treasury": "0x65A5206f9d92D92783c78C60b878A671EA1D2786",
+    "keeper": "0x65A5206f9d92D92783c78C60b878A671EA1D2786",
+    "deployerIsAdmin": true
+  },
+  "external": {
+    "_comment": "Zero means 'this chain has no such contract, so deploy a mock in its place'. sequencerFeed stays zero on both chains: no uptime feed is published for this chain (D-005). priceSourcePlaceholder only has to be non-zero for the AuctionHouse and CapController constructors; both are re-pointed at the SettlementOracle in timelock batch A, and the vault try/catches the cap read in the meantime (D-041).",
+    "usdg": "0x0000000000000000000000000000000000000000",
+    "usdgUsdFeed": "0x0000000000000000000000000000000000000000",
+    "sequencerFeed": "0x0000000000000000000000000000000000000000",
+    "priceSourcePlaceholder": "0x000000000000000000000000000000000000dEaD"
+  },
+  "tickMath": "0x80AbE3b669ecF49FA57883661A4c4F94E79B79e7",
+  "optionTokenUri": "",
+  "vaultCount": 2,
+  "vaults": [
+    {
+      "symbol": "NVDA",
+      "assetClass": "SINGLE_NAME",
+      "name": "Overwrite NVDA",
+      "shareSymbol": "owNVDA",
+      "stock": "0x0000000000000000000000000000000000000000",
+      "feed": "0x0000000000000000000000000000000000000000",
+      "pool": "0x0000000000000000000000000000000000000000",
+      "capUSD": 25000000000,
+      "feeBps": 1000,
+      "minStrikeDistanceBpsWeekday": 300,
+      "minStrikeDistanceBpsWeekend": 100,
+      "minReserveBpsOfSpotWeekday": 10,
+      "minReserveBpsOfSpotWeekend": 3,
+      "mock": {
+        "_comment": "Mirrors the real NVDA/USDG 0.05 % pool of SPEC 1.5: USDG is token0, the stock is token1. The tick is not written here; MockDeployLib binary-searches the production OracleMath.quotePrice8 for the tick that yields price8, exactly as test/TokenBase.t.sol does (D-096).",
+        "tokenName": "Mock NVDA",
+        "stockIsToken0": false,
+        "price8": 20000000000,
+        "liquidity": "0x8AC7230489E80000"
+      },
+      "oracleParams": {
+        "weekdayMaxStale": 93600,
+        "twapGrace": 1800,
+        "sequencerGrace": 3600,
+        "usdgMaxStale": 93600,
+        "weekendTwapBoundBps": 1500,
+        "weekdayTwapBoundBps": 300,
+        "impactBps": 100,
+        "jumpBps": 3000,
+        "usdgBandLowBps": 9800,
+        "usdgBandHighBps": 10200,
+        "minObservationsInWindow": 3,
+        "swapNotionalUSDG": 250000000000
+      }
+    },
+    {
+      "symbol": "SPY",
+      "assetClass": "ETF",
+      "name": "Overwrite SPY",
+      "shareSymbol": "owSPY",
+      "stock": "0x0000000000000000000000000000000000000000",
+      "feed": "0x0000000000000000000000000000000000000000",
+      "pool": "0x0000000000000000000000000000000000000000",
+      "capUSD": 25000000000,
+      "feeBps": 1000,
+      "minStrikeDistanceBpsWeekday": 300,
+      "minStrikeDistanceBpsWeekend": 100,
+      "minReserveBpsOfSpotWeekday": 10,
+      "minReserveBpsOfSpotWeekend": 3,
+      "mock": {
+        "_comment": "The other pool orientation: the stock is token0, USDG is token1. No fixture builds this case, so it is the only place the OracleMath.quotePrice8 token0 branch and the SPEC 9.3 token1-side depth rule (D-052) run on a live chain. Liquidity is raised to 1e21 because the depth rule needs roughly 6e19 at this price in this orientation.",
+        "tokenName": "Mock SPY",
+        "stockIsToken0": true,
+        "price8": 70000000000,
+        "liquidity": "0x3635C9ADC5DEA00000"
+      },
+      "oracleParams": {
+        "weekdayMaxStale": 93600,
+        "twapGrace": 1800,
+        "sequencerGrace": 3600,
+        "usdgMaxStale": 93600,
+        "weekendTwapBoundBps": 1500,
+        "weekdayTwapBoundBps": 300,
+        "impactBps": 100,
+        "jumpBps": 3000,
+        "usdgBandLowBps": 9800,
+        "usdgBandHighBps": 10200,
+        "minObservationsInWindow": 3,
+        "swapNotionalUSDG": 250000000000
+      }
+    }
+  ],
+  "token": {
+    "_comment": "WRITE allocations are constants in src/WRITE.sol and are not configurable (D-059). Only the emissions duration and the WritePriceOracle sanity band are. 126144000 = 4 * 365 days; the band is the D-066 launch proposal for a $0.10 launch.",
+    "deploy": true,
+    "emissionsDuration": 126144000,
+    "sanityLow8": 500000,
+    "sanityHigh8": 500000000
+  }
+}

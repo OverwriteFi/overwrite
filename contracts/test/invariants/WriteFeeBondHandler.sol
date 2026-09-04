@@ -7,7 +7,7 @@ import {FeeRouter} from "../../src/FeeRouter.sol";
 import {BondManager} from "../../src/BondManager.sol";
 import {WritePriceOracle} from "../../src/WritePriceOracle.sol";
 import {MockUSDG} from "../../src/mocks/MockUSDG.sol";
-import {MockUniswapV3Pool} from "../mocks/MockUniswapV3Pool.sol";
+import {MockUniswapV3Pool} from "../../src/mocks/MockUniswapV3Pool.sol";
 import {IBondManager} from "../../src/interfaces/IBondManager.sol";
 import {IFeeRouter} from "../../src/interfaces/IFeeRouter.sol";
 

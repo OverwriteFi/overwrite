@@ -8,7 +8,7 @@ import {LiquidityEscrow} from "../src/LiquidityEscrow.sol";
 import {PointsDistributor} from "../src/PointsDistributor.sol";
 import {EmissionsController} from "../src/EmissionsController.sol";
 import {MockCurvePool} from "./mocks/MockCurvePool.sol";
-import {MockUniswapV3Pool} from "./mocks/MockUniswapV3Pool.sol";
+import {MockUniswapV3Pool} from "../src/mocks/MockUniswapV3Pool.sol";
 import {MockLaunchpad} from "./mocks/MockLaunchpad.sol";
 import {Ownable} from "@openzeppelin/contracts/access/Ownable.sol";
 

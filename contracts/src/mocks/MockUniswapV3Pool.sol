@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: MIT
 pragma solidity 0.8.26;
 
-import {IUniswapV3Pool} from "../../src/interfaces/IUniswapV3Pool.sol";
-import {TickMath} from "../../src/libraries/TickMath.sol";
+import {IUniswapV3Pool} from "../interfaces/IUniswapV3Pool.sol";
+import {TickMath} from "../libraries/TickMath.sol";
 
 /// @dev Uniswap v3 pool mock with a real observation ring (D-014): `write(ts, tick, liquidityAfter)` appends an
 /// observation using the pool's cumulative math (previous tick/liquidity weighted by elapsed time), `observe`

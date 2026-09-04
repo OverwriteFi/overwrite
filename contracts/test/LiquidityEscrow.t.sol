@@ -4,7 +4,7 @@ pragma solidity 0.8.26;
 import {TokenUnitBaseTest} from "./TokenUnitBase.t.sol";
 import {LiquidityEscrow} from "../src/LiquidityEscrow.sol";
 import {MockLaunchpad} from "./mocks/MockLaunchpad.sol";
-import {MockUniswapV3Pool} from "./mocks/MockUniswapV3Pool.sol";
+import {MockUniswapV3Pool} from "../src/mocks/MockUniswapV3Pool.sol";
 import {Ownable} from "@openzeppelin/contracts/access/Ownable.sol";
 
 contract LiquidityEscrowTest is TokenUnitBaseTest {

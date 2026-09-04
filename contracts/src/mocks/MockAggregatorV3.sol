@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT
 pragma solidity 0.8.26;
 
-import {AggregatorV3Interface} from "../../src/interfaces/AggregatorV3Interface.sol";
+import {AggregatorV3Interface} from "../interfaces/AggregatorV3Interface.sol";
 
 /// @dev Chainlink proxy mock with phase-aware round ids (D-014). `getRoundData` reverts for unknown rounds like the
 /// real proxy. Doubles as the sequencer-uptime feed (`answer` 0/1, `startedAt`) and the USDG/USD feed.

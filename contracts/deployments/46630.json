@@ -1,0 +1,38 @@
+{
+  "chainId": 46630,
+  "label": "robinhood-testnet",
+  "deployedAt": 1788553218,
+  "deployer": "0x65A5206f9d92D92783c78C60b878A671EA1D2786",
+  "timelock": "0x7055b20A990dF9e9724a9e0Fe20e8Ab91baA0899",
+  "tickMath": "0x80AbE3b669ecF49FA57883661A4c4F94E79B79e7",
+  "external": {
+    "usdg": "0x640c46710A5C075292655e8602EC1D4BA844A930",
+    "usdgUsdFeed": "0x2C51f2f94BBd847DF1Bb9cb82669B538Cbd96FDe"
+  },
+  "core": {
+    "riskModule": "0x8fc5FF8Ee10E8081ee6D1b0b9BA873149Aaaf007",
+    "optionToken": "0x3F6a1E5f16b66354fd56C8AAA5b25927bEA6aAfC",
+    "bondManager": "0x056E0Def113493512060ed28F5e5AD7cb04A4c6C",
+    "feeRouter": "0x8c7E78F20EE71B7B9d674ee30CC39618c8E10333",
+    "auctionHouse": "0x2Ab9fe15E0E98067a18d804347C7b13E36503A95",
+    "capController": "0x6CBb14A22a1Bd3C3FA1017d757c079D274118f81",
+    "settlementOracle": "0xba214c8463F5C874c7851DCb09b01A0b2319E108"
+  },
+  "vaults": [
+    { "symbol": "NVDA", "vault": "0xe2029A8BDF6f559E50160Eb59f1E4B4Fc7A011C5", "stock": "0xc2D152ebE42be2c65d86c50b410231e5271634fb", "feed": "0x2d4e84FBaE927EcF2CCc924808E593BA48F1b72F", "pool": "0x8e1CFC19D17EC56CB6C6b545596637F60376B3c9" },
+    { "symbol": "SPY", "vault": "0xbAB66DC34052479eF7a97e213DA8a9948ff772E3", "stock": "0x3c37fE477079789cA80b0F20A6585d96894f2006", "feed": "0x301dd8371eD858A77474c5506236B8EBA5F5961b", "pool": "0x75671ad2E95DB072817DF949A1fD143A8C398769" }
+  ],
+  "token": {
+    "write": "0x0B3D6678024Cf5063f8C0fcfe3e39354d38E71CA",
+    "liquidityEscrow": "0x5e0B4E64d1CA5718C169fB59c27BA7fA62D2F671",
+    "emissionsController": "0x8C3Ff7AA63b3b688B50bDc50c3C60A88a3274a31",
+    "treasuryVesting": "0x27D0bC570243D6B0357C96dd2d6e1F64ad95F69D",
+    "teamVesting": "0xa0abaa4eC77a42ceaaB065a0de2bD93dD44e5273",
+    "pointsDistributor": "0xae2E4F198fc8c29e91422E197Ffd0217Ad679712",
+    "writePriceOracle": "0xfEca213236d5e21b8d38A083D4bf6694C0a970b7",
+    "safetyModule": "0xa7f27067858593C5D87C60C9407F726fc2b48e05"
+  },
+  "mocked": ["USDG", "USDG/USD feed", "NVDA stock token", "NVDA/USD feed", "NVDA/USDG 0.05% pool", "SPY stock token", "SPY/USD feed", "SPY/USDG 0.05% pool"],
+  "mockedCount": 8,
+  "vaultCount": 2
+}

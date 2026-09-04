@@ -10,7 +10,12 @@ optimizer = true
 optimizer_runs = 200
 via_ir = false
 bytecode_hash = "none"
-fs_permissions = [{ access = "read", path = "./" }]
+# The project root, `config/` included, stays read-only. The only thing a deploy writes is the address book
+# it produces under `deployments/`, which is also where a re-run reads the mock addresses back from.
+fs_permissions = [
+    { access = "read", path = "./" },
+    { access = "read-write", path = "./deployments" },
+]
 
 # TickMath is a deployed library, not an inlined one (D-058): its `getSqrtRatioAtTick` is `public`, so every consumer
 # carries a link placeholder until an address is supplied. `forge test` deploys and links it automatically, so this list

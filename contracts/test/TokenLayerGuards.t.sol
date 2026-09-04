@@ -8,7 +8,7 @@ import {BondManager} from "../src/BondManager.sol";
 import {WritePriceOracle} from "../src/WritePriceOracle.sol";
 import {IBondManager} from "../src/interfaces/IBondManager.sol";
 import {IFeeRouter} from "../src/interfaces/IFeeRouter.sol";
-import {MockAggregatorV3} from "./mocks/MockAggregatorV3.sol";
+import {MockAggregatorV3} from "../src/mocks/MockAggregatorV3.sol";
 import {Ownable} from "@openzeppelin/contracts/access/Ownable.sol";
 
 /// @dev Guards added by the independent review of this phase (D-098), plus the revert branches and

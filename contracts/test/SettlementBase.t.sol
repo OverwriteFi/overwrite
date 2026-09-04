@@ -5,8 +5,8 @@ import {AuctionBaseTest} from "./AuctionBase.t.sol";
 import {RiskModule} from "../src/RiskModule.sol";
 import {SettlementOracle} from "../src/SettlementOracle.sol";
 import {ISettlementOracle} from "../src/interfaces/ISettlementOracle.sol";
-import {MockAggregatorV3} from "./mocks/MockAggregatorV3.sol";
-import {MockUniswapV3Pool} from "./mocks/MockUniswapV3Pool.sol";
+import {MockAggregatorV3} from "../src/mocks/MockAggregatorV3.sol";
+import {MockUniswapV3Pool} from "../src/mocks/MockUniswapV3Pool.sol";
 import {OracleParams, SeriesKind} from "../src/Types.sol";
 
 /// @dev Full stack with the real RiskModule and SettlementOracle wired as the vault's immutables, a phase-1 Chainlink

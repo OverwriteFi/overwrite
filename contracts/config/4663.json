@@ -1,0 +1,86 @@
+{
+  "_comment": "Robinhood Chain mainnet. Every external address is real and comes from docs/SPEC.md 1.4 and 1.5 (cast-verified 2026-09-02), so no mock is deployed on this chain; a zero here is what tells the deploy a mock is needed, and there are none. The four governance addresses are deliberately left at zero: script/Config.sol refuses to run on 4663 while any of them is zero, so a mainnet deploy cannot start until a human has filled in the Ledger EOA, the two guardian keys, the treasury and the keeper. See docs/RUNBOOK.md.",
+  "chainId": 4663,
+  "label": "robinhood-mainnet",
+
+  "explorer": {
+    "url": "https://robinhoodchain.blockscout.com",
+    "verifier": "blockscout",
+    "verifierUrl": "https://robinhoodchain.blockscout.com/api/"
+  },
+
+  "governance": {
+    "_comment": "SPEC 15 / D-003: TimelockController(48 h, proposers = [adminEOA], executors = [adminEOA], admin = address(0) so it self-administers). The admin EOA is a hardware wallet; no multisig, by decision. Two guardian holders per D-012 as amended by D-029: a hot key on the keeper server, distinct from the keeper transaction key, and an off-server key held by the founder. cancellers is empty and stays empty until OQ-001 is decided; a canceller must never be a guardian key.",
+    "timelockMinDelay": 172800,
+    "admin": "0x0000000000000000000000000000000000000000",
+    "guardians": [
+      "0x0000000000000000000000000000000000000000",
+      "0x0000000000000000000000000000000000000000"
+    ],
+    "cancellers": [],
+    "treasury": "0x0000000000000000000000000000000000000000",
+    "keeper": "0x0000000000000000000000000000000000000000",
+    "deployerIsAdmin": false
+  },
+
+  "external": {
+    "_comment": "USDG and the USDG/USD feed are the real Paxos and Chainlink addresses (SPEC 1.4, 1.5). sequencerFeed is zero because no L2 uptime feed is published for this chain (D-005); the storage slot and the check stay so the timelock can enable it later. priceSourcePlaceholder is only ever the constructor argument of AuctionHouse and CapController, both re-pointed at the SettlementOracle in timelock batch A.",
+    "usdg": "0x5fc5360D0400a0Fd4f2af552ADD042D716F1d168",
+    "usdgUsdFeed": "0x61B7e5650328764B076A108EFF5fa7282a1B9aD2",
+    "sequencerFeed": "0x0000000000000000000000000000000000000000",
+    "priceSourcePlaceholder": "0x000000000000000000000000000000000000dEaD"
+  },
+
+  "tickMath": "0x0000000000000000000000000000000000000000",
+  "optionTokenUri": "",
+
+  "vaultCount": 1,
+  "vaults": [
+    {
+      "_comment": "NVDA only at launch. SPEC 1.5 records that the SPY/USDG and QQQ/USDG 0.05 % pools exist, but their depth against the 250 000 USDG / 1 % rule of SPEC 9.3 was never measured, and OQ-002 blocks creating those vaults until it is. Adding one is a new entry here plus a re-run: AuctionHouse.registerVault and SettlementOracle.registerVault are per-vault and the earlier vaults are untouched.",
+      "symbol": "NVDA",
+      "assetClass": "SINGLE_NAME",
+      "name": "Overwrite NVDA",
+      "shareSymbol": "owNVDA",
+      "stock": "0xd0601CE157Db5bdC3162BbaC2a2C8aF5320D9EEC",
+      "feed": "0x379EC4f7C378F34a1B47E4F3cbeBCbAC3E8E9F15",
+      "pool": "0xd4EB21209C4D6093f80B5b84f5C45cc093EA14a3",
+      "capUSD": 25000000000,
+      "feeBps": 1000,
+      "minStrikeDistanceBpsWeekday": 300,
+      "minStrikeDistanceBpsWeekend": 100,
+      "minReserveBpsOfSpotWeekday": 10,
+      "minReserveBpsOfSpotWeekend": 3,
+      "mock": {
+        "_comment": "Unused on 4663: a mock is deployed only where the address above is zero.",
+        "tokenName": "",
+        "stockIsToken0": false,
+        "price8": 0,
+        "liquidity": "0x0"
+      },
+      "oracleParams": {
+        "_comment": "The SPEC 9 defaults, identical to RiskModule.defaultParams(). Deploy emits a setOracleParams call only for the vaults whose block differs from that default, so batch A stays as short as it can be. OQ-002 note: usdgMaxStale of 26 h will frequently fail on a Sunday, since the USDG/USD feed follows the same 24/5 schedule as the stock feeds; raising it here to 288000 (80 h) is the recorded alternative to accepting path 3 as the de-facto weekend primary.",
+        "weekdayMaxStale": 93600,
+        "twapGrace": 1800,
+        "sequencerGrace": 3600,
+        "usdgMaxStale": 93600,
+        "weekendTwapBoundBps": 1500,
+        "weekdayTwapBoundBps": 300,
+        "impactBps": 100,
+        "jumpBps": 3000,
+        "usdgBandLowBps": 9800,
+        "usdgBandHighBps": 10200,
+        "minObservationsInWindow": 3,
+        "swapNotionalUSDG": 250000000000
+      }
+    }
+  ],
+
+  "token": {
+    "_comment": "Set deploy to false to ship the vault layer alone and run the token layer later through script/DeployToken.s.sol, which uses the same TokenDeployLib. With deploy true the token layer rides the same four stages.",
+    "deploy": true,
+    "emissionsDuration": 126144000,
+    "sanityLow8": 500000,
+    "sanityHigh8": 500000000
+  }
+}

@@ -13,7 +13,7 @@ import {WritePriceOracle} from "../src/WritePriceOracle.sol";
 import {SafetyModule} from "../src/SafetyModule.sol";
 import {OracleMath} from "../src/libraries/OracleMath.sol";
 import {TickMath} from "../src/libraries/TickMath.sol";
-import {MockUniswapV3Pool} from "./mocks/MockUniswapV3Pool.sol";
+import {MockUniswapV3Pool} from "../src/mocks/MockUniswapV3Pool.sol";
 import {MockLaunchpad} from "./mocks/MockLaunchpad.sol";
 
 /// @dev Full stack (real RiskModule, SettlementOracle, AuctionHouse, vault) plus the whole WRITE token layer,

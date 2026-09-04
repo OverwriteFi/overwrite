@@ -4,8 +4,8 @@ pragma solidity 0.8.26;
 import {TokenBaseTest} from "./TokenBase.t.sol";
 import {WritePriceOracle} from "../src/WritePriceOracle.sol";
 import {TickMath} from "../src/libraries/TickMath.sol";
-import {MockUniswapV3Pool} from "./mocks/MockUniswapV3Pool.sol";
-import {MockAggregatorV3} from "./mocks/MockAggregatorV3.sol";
+import {MockUniswapV3Pool} from "../src/mocks/MockUniswapV3Pool.sol";
+import {MockAggregatorV3} from "../src/mocks/MockAggregatorV3.sol";
 import {Ownable} from "@openzeppelin/contracts/access/Ownable.sol";
 
 contract WritePriceOracleTest is TokenBaseTest {

@@ -11,8 +11,8 @@ import {ISettlementOracle} from "../../src/interfaces/ISettlementOracle.sol";
 import {IAuctionHouse} from "../../src/interfaces/IAuctionHouse.sol";
 import {ICoveredCallVault} from "../../src/interfaces/ICoveredCallVault.sol";
 import {MockStockToken} from "../../src/mocks/MockStockToken.sol";
-import {MockAggregatorV3} from "../mocks/MockAggregatorV3.sol";
-import {MockUniswapV3Pool} from "../mocks/MockUniswapV3Pool.sol";
+import {MockAggregatorV3} from "../../src/mocks/MockAggregatorV3.sol";
+import {MockUniswapV3Pool} from "../../src/mocks/MockUniswapV3Pool.sol";
 import {OracleParams, SeriesKind, SeriesState, VaultState} from "../../src/Types.sol";
 
 /// @dev Stateful fuzzing handler for the settlement layer (SPEC §17 I-5, I-7, I-9..I-12, I-14). Every action is

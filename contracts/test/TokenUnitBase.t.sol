@@ -11,7 +11,7 @@ import {PointsDistributor} from "../src/PointsDistributor.sol";
 import {WritePriceOracle} from "../src/WritePriceOracle.sol";
 import {SafetyModule} from "../src/SafetyModule.sol";
 import {MockUSDG} from "../src/mocks/MockUSDG.sol";
-import {MockAggregatorV3} from "./mocks/MockAggregatorV3.sol";
+import {MockAggregatorV3} from "../src/mocks/MockAggregatorV3.sol";
 import {MockLaunchpad} from "./mocks/MockLaunchpad.sol";
 
 /// @dev Bare fixture for the pure-token suites (WRITE, both Vesting instances, PointsDistributor,
