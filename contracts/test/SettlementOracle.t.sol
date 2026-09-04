@@ -1184,6 +1184,24 @@ contract SettlementOracleTest is SettlementBaseTest {
         assertEq(rm.owner(), admin);
     }
 
+    /// D-058: TickMath is a deployed library reached by DELEGATECALL, so a deployment that forgets to link it (the
+    /// bytecode keeps a placeholder address with no code) or links the wrong contract must fail in the constructor,
+    /// not at the first weekend expiry. `address(TickMath)` is the linked address forge deployed for this run.
+    function test_D058_constructorRejectsUnlinkedOrWrongTickMath() public {
+        address lib = address(TickMath);
+        assertGt(lib.code.length, 0, "forge linked the library for the test run");
+
+        // wrong library: returns 0 for every tick (PUSH1 0, PUSH1 0, MSTORE, PUSH1 32, PUSH1 0, RETURN)
+        vm.etch(lib, hex"600060005260206000f3");
+        vm.expectRevert(abi.encodeWithSelector(SettlementOracle.Miswired.selector, bytes32("TICK_MATH")));
+        new SettlementOracle(address(rm), address(ah), address(usdgFeed), admin);
+
+        // unlinked: the placeholder address has no code at all
+        vm.etch(lib, hex"");
+        vm.expectRevert();
+        new SettlementOracle(address(rm), address(ah), address(usdgFeed), admin);
+    }
+
     /// A feed that serves no round at all cannot be registered (D-057).
     function test_registerVault_requiresAReachableFirstRound() public {
         (CoveredCallVault v, MockStockToken s) = _newVault(address(oracle), address(rm), true);

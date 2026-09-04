@@ -12,6 +12,13 @@ via_ir = false
 bytecode_hash = "none"
 fs_permissions = [{ access = "read", path = "./" }]
 
+# TickMath is a deployed library, not an inlined one (D-058): its `getSqrtRatioAtTick` is `public`, so every consumer
+# carries a link placeholder until an address is supplied. `forge test` deploys and links it automatically, so this list
+# stays empty in the repo. A real deployment fills it in (or passes the same string to `forge create --libraries`):
+#   libraries = ["src/libraries/TickMath.sol:TickMath:0xTHE_DEPLOYED_ADDRESS"]
+# SettlementOracle's constructor rejects an unlinked or mis-linked library, so a wrong value fails the deploy.
+libraries = []
+
 [profile.default.fuzz]
 runs = 256
 

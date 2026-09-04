@@ -165,6 +165,10 @@ contract SettlementOracle is Ownable2Step, ReentrancyGuard, IPriceSource, ISettl
             revert ZeroAddress();
         }
         if (AggregatorV3Interface(usdgUsdFeed_).decimals() != 8) revert WrongFeedDecimals();
+        // TickMath is a deployed library reached by DELEGATECALL (D-058). Unlinked, the placeholder address has no
+        // code and every TWAP path would revert at settlement; mis-linked, it would return wrong prices. Both fail
+        // the deployment here instead of at the first weekend expiry.
+        if (TickMath.getSqrtRatioAtTick(0) != 2 ** 96) revert Miswired("TICK_MATH");
         riskModule = IRiskModule(riskModule_);
         auctionHouse = IAuctionHouse(auctionHouse_);
         usdgUsdFeed = AggregatorV3Interface(usdgUsdFeed_);

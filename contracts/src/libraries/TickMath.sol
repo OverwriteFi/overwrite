@@ -13,7 +13,7 @@ library TickMath {
     error TickOutOfRange(int24 tick);
 
     /// @notice sqrtPriceX96 = sqrt(1.0001^tick) × 2^96, rounded up, for `tick ∈ [MIN_TICK, MAX_TICK]`.
-    function getSqrtRatioAtTick(int24 tick) internal pure returns (uint160 sqrtPriceX96) {
+    function getSqrtRatioAtTick(int24 tick) public pure returns (uint160 sqrtPriceX96) {
         if (tick < MIN_TICK || tick > MAX_TICK) revert TickOutOfRange(tick);
         uint256 absTick = tick < 0 ? uint256(-int256(tick)) : uint256(int256(tick));
 

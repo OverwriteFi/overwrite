@@ -721,3 +721,34 @@ Scope recorded with D-043…D-048: BondManager implements MM and curator bonds i
 **Why.** CLAUDE.md rules 2 and 4: never settle on a price that fails the §9 policy, and never ship with a failing test. Items 1 and 2 were fund-locking and key-dependency bugs that the invariants were structurally unable to see.
 
 **Consequences.** SPEC §9.1, §9.3, §9.6, §16.2, §17; `ISettlementOracle` gains `previewResolveByOracle` and `VaultConfig.firstRound`; new tests `test_T14_longGarbageRunCannotBrickTheVault`, `testFuzz_T14_garbageRunNeverBricksTheVault`, `test_T14_resolveHaltedByOracle_skipsGarbageFirstAfter`, `test_settle_path3_skipsGarbageFirstAfter`, `test_settle_refHint_skipsLongGarbageRun`, `test_T08_backstopDoesNotPreemptAvailablePath`, `test_T08_backstopDoesNotPreemptPath3`, `test_T08_zeroRefClaimRejectedWhenTheFeedShowsARound`, `test_T05_sequencerFutureStartedAtCountsAsDown`, `test_T10_absurdMultiplierFailsTheGuardWithoutReverting`, `test_renounceOwnershipDisabled`, `test_registerVault_requiresAReachableFirstRound`, `invariant_I14_expiredSeriesActionable`. Also from the review: `testFuzz_T06_inflationAttackUnprofitable` renamed so the THREAT-MODEL grep finds T-06, `MockUniswapV3Pool` grows its observation cardinality like a real pool, and `OracleMath.sqrtFactor1e9` gained an independent floored-square-root fuzz reference.
+
+---
+
+## D-058 · 2026-09-04 · TickMath is a deployed, linked library; the oracle rejects a bad link in its constructor
+
+**Decision.** `TickMath.getSqrtRatioAtTick` becomes `public`, so the library is deployed once and reached by `DELEGATECALL`
+instead of being inlined into every consumer. `SettlementOracle` drops from 23,620 to **22,646 bytes** (headroom 956 → 1,930 of
+the 24,576 limit); `TickMath` deploys as its own 1,357-byte contract. The library's `internal constant`s (`MIN_TICK`,
+`MAX_TICK`, `MIN_SQRT_RATIO`, `MAX_SQRT_RATIO`) and the `TickOutOfRange` error stay compile-time, so consumers and tests are
+unchanged apart from the link.
+
+Linking: `forge test` deploys and links the library automatically, so `libraries` in `foundry.toml` stays empty in the repo and
+the entry is documented there for deployment (`libraries = ["src/libraries/TickMath.sol:TickMath:0x…"]`, or the same string via
+`forge create --libraries`). An unlinked build keeps a placeholder (`__$55326c8c82635485e895268bfefd3c9895$__`, one site in
+`SettlementOracle`) whose address holds no code, which would make every TWAP path revert at the first weekend expiry and turn
+`capPrice` into "no price" (blocking deposits) — a failure that unit tests, which always link, cannot catch. So the constructor
+now runs `TickMath.getSqrtRatioAtTick(0) != 2 ** 96 → Miswired("TICK_MATH")`: an unlinked library has no code and reverts the
+deployment, a mis-linked one returns the wrong value and also reverts it.
+
+**Alternatives considered.** Leaving `TickMath` inlined (956 bytes of headroom in the contract that will carry the next oracle
+change; rejected as the tightest constraint in the repo after AuctionHouse's 1.5 KB). Lowering `optimizer_runs` to 1 for this
+one contract through `compilation_restrictions`: measured, saved only 179 bytes and costs runtime gas everywhere. Splitting the
+price views into a separate `IPriceSource` lens contract: a bigger design change (D-054 puts `capPrice` on the oracle) for a
+similar win, and it adds a second address to the deployment instead of a library.
+
+**Consequences.** `contracts/foundry.toml` gains the documented `libraries` key; deployment order (README) gains "deploy
+TickMath first, link it into SettlementOracle"; the deploy script and its fork test must assert the constructor accepted the
+link. `test_D058_constructorRejectsUnlinkedOrWrongTickMath` etches over `address(TickMath)` to prove both failure modes.
+Gas: one `DELEGATECALL` per TWAP evaluation (`getSqrtRatioAtTick` is called once per `_poolTwap`), which leaves
+`test_T07_settleGasBound` far inside its 1.5 M bound. D-055 (the v4-core port, no assembly) is unchanged; this only changes how
+it is deployed.
