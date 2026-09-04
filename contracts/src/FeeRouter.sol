@@ -70,6 +70,8 @@ contract FeeRouter is IFeeRouter, Ownable2Step, ReentrancyGuard {
     error WriteNotLaunched();
     error InsufficientWriteBalance(uint256 have, uint256 want);
     error Miswired(bytes32 what);
+    error WriteBalanceReserved(uint256 needed, uint256 remaining);
+    error RenounceDisabled();
 
     // ───────────────────────────── events (SPEC §16.1) ─────────────────────────────
 
@@ -160,6 +162,8 @@ contract FeeRouter is IFeeRouter, Ownable2Step, ReentrancyGuard {
         address token = writeToken;
         if (token == address(0)) revert WriteNotLaunched();
         if (!initialised[vault]) revert NotInitialised(vault);
+        // Without a curator there is no withdrawal path at all, so the deposit would be unrecoverable.
+        if (curatorOf[vault] == address(0)) revert NotCurator();
         if (amount == 0) revert ZeroAmount();
         _writeBalance[vault] += amount;
         IERC20(token).safeTransferFrom(msg.sender, address(this), amount);
@@ -176,7 +180,19 @@ contract FeeRouter is IFeeRouter, Ownable2Step, ReentrancyGuard {
         if (amount == 0) revert ZeroAmount();
         uint256 bal = _writeBalance[vault];
         if (amount > bal) revert InsufficientWriteBalance(bal, amount);
-        _writeBalance[vault] = bal - amount;
+        uint256 remaining = bal - amount;
+        // A fee that is already booked must stay covered. `flush` is permissionless and priced at call time,
+        // so without this a curator could watch the price and pull the prefunded WRITE moments before a flush
+        // would have debited it, taking the discount only when it suits them (D-098). If the oracle cannot
+        // price the fee the reservation is skipped -- the flush would fall back to USDG anyway.
+        if (_mode[vault] == FeeMode.WRITE) {
+            uint256 booked = pending[vault];
+            if (booked != 0) {
+                (uint256 needed, bool ok) = previewWriteFee(booked);
+                if (ok && remaining < needed) revert WriteBalanceReserved(needed, remaining);
+            }
+        }
+        _writeBalance[vault] = remaining;
         IERC20(token).safeTransfer(msg.sender, amount);
         emit WriteWithdrawn(vault, msg.sender, amount);
     }
@@ -215,6 +231,11 @@ contract FeeRouter is IFeeRouter, Ownable2Step, ReentrancyGuard {
         if (curator == address(0)) revert ZeroAddress();
         emit ParameterChanged(vault, "curator", uint256(uint160(curatorOf[vault])), uint256(uint160(curator)));
         curatorOf[vault] = curator;
+    }
+
+    /// @dev Renouncing would freeze the fee mode, the curator wiring and every prefunded WRITE balance.
+    function renounceOwnership() public view override onlyOwner {
+        revert RenounceDisabled();
     }
 
     function setFeeBps(address vault, uint16 bps) external onlyOwner {
@@ -271,7 +292,7 @@ contract FeeRouter is IFeeRouter, Ownable2Step, ReentrancyGuard {
     }
 
     /// @notice WRITE the curator would owe for a `feeUSD6` fee right now, and whether the path is available.
-    function previewWriteFee(uint256 feeUSD6) external view returns (uint256 writeAmount, bool ok) {
+    function previewWriteFee(uint256 feeUSD6) public view returns (uint256 writeAmount, bool ok) {
         uint256 price8;
         (price8, ok) = _quote();
         if (!ok || price8 == 0) return (0, false);

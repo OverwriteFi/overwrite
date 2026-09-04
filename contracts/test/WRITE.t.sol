@@ -8,6 +8,8 @@ import {EmissionsController} from "../src/EmissionsController.sol";
 import {Vesting} from "../src/Vesting.sol";
 import {PointsDistributor} from "../src/PointsDistributor.sol";
 import {IERC20Errors} from "@openzeppelin/contracts/interfaces/draft-IERC6093.sol";
+import {ERC20Permit} from "@openzeppelin/contracts/token/ERC20/extensions/ERC20Permit.sol";
+import {MessageHashUtils} from "@openzeppelin/contracts/utils/cryptography/MessageHashUtils.sol";
 
 contract WRITETest is TokenUnitBaseTest {
     /// @dev A fresh, unwired set of holders for constructor-failure cases.
@@ -47,6 +49,8 @@ contract WRITETest is TokenUnitBaseTest {
     function test_constructor_revertsOnEOARecipient() public {
         WRITE.Holders memory h = _freshHolders();
         h.liquidity = makeAddr("someEOA");
+        // An EOA has no `allocation()`; the staticcall to a codeless address returns no data and the decode
+        // fails. A bare `expectRevert` is correct here -- the revert comes from the ABI decoder, not an error.
         vm.expectRevert();
         new WRITE(h);
     }
@@ -116,17 +120,7 @@ contract WRITETest is TokenUnitBaseTest {
         uint256 pk = 0xA11CE;
         address owner_ = vm.addr(pk);
         uint256 deadline = block.timestamp + 1 hours;
-        bytes32 structHash = keccak256(
-            abi.encode(
-                keccak256("Permit(address owner,address spender,uint256 value,uint256 nonce,uint256 deadline)"),
-                owner_,
-                bob,
-                500e18,
-                write.nonces(owner_),
-                deadline
-            )
-        );
-        bytes32 digest = keccak256(abi.encodePacked("\x19\x01", write.DOMAIN_SEPARATOR(), structHash));
+        bytes32 digest = _permitDigest(owner_, bob, 500e18, deadline);
         (uint8 v, bytes32 r, bytes32 s) = vm.sign(pk, digest);
 
         write.permit(owner_, bob, 500e18, deadline, v, r, s);
@@ -134,13 +128,35 @@ contract WRITETest is TokenUnitBaseTest {
         assertEq(write.nonces(owner_), 1);
     }
 
+    /// @dev Signs the real EIP-712 digest, so the revert must come from the deadline branch. Signing garbage
+    /// (the previous version) reverts on the signer check instead and would pass with the deadline removed.
     function test_permit_revertsOnExpiredDeadline() public {
         uint256 pk = 0xA11CE;
         address owner_ = vm.addr(pk);
         uint256 deadline = block.timestamp - 1;
-        (uint8 v, bytes32 r, bytes32 s) = vm.sign(pk, bytes32(uint256(1)));
-        vm.expectRevert();
+        bytes32 digest = _permitDigest(owner_, bob, 1e18, deadline);
+        (uint8 v, bytes32 r, bytes32 s) = vm.sign(pk, digest);
+        vm.expectRevert(abi.encodeWithSelector(ERC20Permit.ERC2612ExpiredSignature.selector, deadline));
         write.permit(owner_, bob, 1e18, deadline, v, r, s);
+    }
+
+    /// @dev Shared EIP-712 digest builder for the two permit tests.
+    function _permitDigest(address owner_, address spender, uint256 value, uint256 deadline)
+        internal
+        view
+        returns (bytes32)
+    {
+        bytes32 structHash = keccak256(
+            abi.encode(
+                keccak256("Permit(address owner,address spender,uint256 value,uint256 nonce,uint256 deadline)"),
+                owner_,
+                spender,
+                value,
+                write.nonces(owner_),
+                deadline
+            )
+        );
+        return MessageHashUtils.toTypedDataHash(write.DOMAIN_SEPARATOR(), structHash);
     }
 
     // ═════════════════════════════ fuzz ═════════════════════════════

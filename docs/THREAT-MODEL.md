@@ -77,6 +77,11 @@ Severity is worst-case impact if the threat materialises with mitigations in pla
 | T-18 | Deposit-queue griefing blocks `openAuction` | Low–Medium | High | Closed | D-032 |
 | T-19 | Keeper + MM collusion on auction parameters | Medium | Medium | Low | D-027 |
 | T-20 | Chain-level trust (council, sequencer FCFS, tx filtering) | Critical | Low | Accepted | — |
+| T-21 | WRITE price manipulation feeding the deposit cap and the fee discount | High | Medium | Medium, bounded by the depth rule and the sanity band | D-066, D-068 |
+| T-22 | Bond-migration griefing / mass un-bonding of market makers | Medium | Low | Low (four visible calls, dual-asset grace) | D-080, D-081, D-082 |
+| T-23 | Emissions misdirection (rate, sink, unallocated redirect) | Medium | Low | Low (bounded rate, one-shot sink, timelocked) | D-074, D-076, D-077 |
+| T-24 | Points root mis-issuance or over-issuance | Medium | Low | Low (per-round allocation cap) | D-093 |
+| T-25 | Launchpad destination error burning 25 % of supply | High | Low | Low (raw-AMM guard, freeze on first fund) | D-094, D-098 |
 
 The last column names the DECISIONS.md entry that adopted the revision; §4 maps the original RS ids to decisions and records the founder's amendments.
 
@@ -631,6 +636,102 @@ Still open, not part of the sixteen (SPEC §18 OQ-001, OQ-002): a canceller ("ve
 - Guardian-induced idleness for up to 48 h (T-15).
 
 ---
+
+### T-21 · WRITE price manipulation into the deposit cap and the fee discount
+
+The WRITE/USDG pool is newer, thinner and far more manipulable than any stock pool, and after the token launch
+its price does two jobs: `SafetyModule.valueUSD()` sizes **every vault's deposit cap** through
+`CapController` (`cap = k × safetyModuleValueUSD × weight`), and `FeeRouter` prices the WRITE fee. Both
+consumers are harmed by the same direction of manipulation — an inflated price inflates caps *and* cheapens
+the fee — so there is no natural hedge between them.
+
+Mitigations, all in `WritePriceOracle`: a 30-minute TWAP rather than spot; `OracleMath.depthOk` requiring
+250 000 USDG to move the pool by more than 100 bps over the window (the D-018 harmonic-liquidity rule, reused
+unchanged from the stock path); the USDG/USD peg band; and the **mandatory sanity band** (D-066), which is a
+*validity* band, not a clamp — a quote outside it reports "no price", which closes deposits rather than
+inflating them. Chainlink takes priority once a WRITE/USD feed exists.
+
+Residual: inside the band the cap does track the price, which is intended. The ceiling is therefore the real
+bound on a sustained pump; at the proposed launch values (`0.005e8`–`5.00e8` against a $0.10 launch) that is
+50×, and re-banding is a 48 h proposal. Regressions: `test_T03_singleBlockSpikeBarelyMovesTheTwap`,
+`test_T21_aPumpBeyondTheSanityCeilingClosesCapsRatherThanInflatingThem`,
+`test_T21_withinTheBandTheCapTracksThePrice`, `test_writePrice_notOkOnThinLiquidity`.
+
+### T-22 · Bond-migration griefing
+
+`AuctionHouse.bid` gates on `hasActiveMMBond` with no try/catch, so anything that un-bonds market makers
+en masse stops bidding entirely and collapses the clearing price. Two designs guard this. The WRITE
+requirement is a **fixed token amount**, never oracle-denominated (D-080), so no price move can un-bond anyone
+— a cheap TWAP push on a young token's own pool would otherwise do it in one block. And the migration is four
+separately reviewable timelock calls (D-081), the last of which reverts unless both WRITE requirements are
+already set, so a half-configured migration cannot execute.
+
+Residual: the requirement drifts against USD and must be re-pegged by governance; a badly chosen amount is a
+governance error, not an attack. Regressions: `test_T22_migrationCannotUnbondEveryoneInOneCall`,
+`test_T13_migrationIsNotACollateralEscapeHatch`, `test_startMigration_requiresBothRequirements`,
+`testFuzz_migrationNeverStrandsABond`.
+
+### T-23 · Emissions misdirection
+
+`setRate` is a timelock lever whose ceiling is the whole 300 M bucket over one year, and `setSink` is
+one-shot. A compromised timelock could set the rate to zero (starving stakers) or redirect the parked
+`unallocatedRewards`. It cannot reach credited rewards: `redirectUnallocated` moves only emissions that
+accrued while nothing was staked, and `_accrue`'s only source is `EmissionsController.claim()`.
+
+Mitigations: `MAX_RATE` and `MIN_DURATION` bound the constructor and the setter together (D-076); `endTime` is
+immutable (D-077); `setRate` checkpoints before changing, so elapsed time keeps its old rate; `setSink`
+asserts the candidate's two back-references. Regressions:
+`test_T13_redirectUnallocatedCannotReachStakerRewards`, `test_setRate_isNeverRetroactive`,
+`test_setSink_rejectsASinkPointingElsewhere`, `invariant_I22_rewardsNeverExceedEmissionsReleased`.
+
+### T-24 · Points root mis-issuance
+
+Points are computed off-chain (D-013), so a wrong root is a real possibility. On-chain the damage is confined
+per round: `setRound` reserves the round's allocation against `unreserved()`, and `RoundExhausted` stops a
+round paying out more than it reserved however many leaves the root contains. A round is amendable only
+before it opens, when nothing can have been claimed. The leaf is round-scoped and double-hashed, so a proof
+cannot be replayed into another round and an internal node cannot pose as a leaf.
+
+Residual: the "leaf amounts sum to the allocation" check is off-chain only; an over-issuing root means a race
+among claimants within that round, not a loss beyond it. Regressions:
+`test_claim_roundExhaustedConfinesAnOverIssuingRoot`, `test_claim_revertsOnCrossRoundReplay`,
+`test_setRound_revertsOnOverCommit`, `test_setRound_amendableOnlyBeforeStart`, `invariant_I32`, `invariant_I34`.
+
+### T-25 · Launchpad destination error
+
+`LiquidityEscrow` holds 25 % of supply and releases it with a plain `transfer`. Into a bare AMM pool that is a
+donation the next swap takes — 250 M gone in one block — and `onlyOwner` does not help, because the timelock
+is the party making the typo. `setPool` therefore rejects anything exposing a `token0()/token1()` or
+`coins(uint256)` getter that returns WRITE, and rejects the escrow itself and the token (both have code and
+neither exposes a pair getter, so a shape probe alone would wave them through). The pool is re-pointable until
+the first `fund`, then frozen.
+
+Residual: the probe is a typo guard, not a proof — a thin wrapper around a pool defeats it, so whoever writes
+the proposal still has to verify the destination. Regressions: `test_T25_setPoolRejectsEveryRawAmmShape` (all four shapes),
+`test_setPool_revertsOnRawAmmPool`, `test_setPool_repointableUntilFirstFundThenFrozen`.
+
+### Token-layer notes on existing threats
+
+- **T-05 (sequencer)**: `observe` interpolates across an outage and reports a pre-outage tick as fresh. That
+  stale price would size every deposit cap, so `WritePriceOracle` carries the same sequencer-uptime check and
+  recovery grace as `SettlementOracle` (D-098). Regression:
+  `test_T05_writeTwapIsRejectedWhileTheSequencerIsDown`.
+- **T-11 / T-12 (token failures)**: WRITE has no owner, mint, pause or blocklist, so unlike the stock token
+  and USDG it cannot be frozen out from under a bonder or a staker. A frozen *curator* does block the WRITE
+  flush, but the revert rolls the call back, so the fee is delayed rather than destroyed and a mode flip
+  recovers it; clearing is unaffected either way. Regressions:
+  `test_T11_writeHasNoPauseFreezeOrBlocklist`, `test_T12_frozenCuratorBlocksTheFlushButNeverTheClearing`,
+  `test_T12_clearSurvivesAFrozenCuratorAndADeadOracle`, `test_T07_clearNeverRevertsBecauseOfTheWritePath`.
+- **T-13 (privileged roles)**: the 30 % cap and the 14-day interval together bound how fast a compromised
+  timelock can drain the backstop — after five events, ten weeks apart, 0.7⁵ = 16.8 % still remains.
+  Regression: `test_T13_repeatedSlashesDrainSlowlyAndNeverFully`.
+- **T-14 (admin key)**: a staker cannot exit ahead of a queued slash. The 14-day cooldown dominates the 48 h
+  delay, and a slash additionally voids requests that had already matured, closing the ~29 % duty-cycle escape
+  a standing request would otherwise give. Regressions: `test_T14_stakerCannotExitAheadOfAQueuedSlash`,
+  `test_slash_voidsAlreadyMaturedUnstakeRequests`.
+- **T-16 (reentrancy)**: WRITE is a plain ERC-20 with no transfer hook, so no payout in the layer can call its
+  recipient; every transferring function is `nonReentrant` besides. Regressions:
+  `test_T16_writeTransfersNeverCallTheRecipient`, `test_T16_everyPayoutPathToAContractRecipientIsInert`.
 
 ## 6. Test naming and coverage rule
 

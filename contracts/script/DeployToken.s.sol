@@ -5,109 +5,129 @@ import {Script} from "forge-std/Script.sol";
 import {console2} from "forge-std/console2.sol";
 
 import {TokenDeployLib} from "./TokenDeployLib.sol";
-import {Ownable2Step} from "@openzeppelin/contracts/access/Ownable2Step.sol";
+import {WRITE} from "../src/WRITE.sol";
+import {WritePriceOracle} from "../src/WritePriceOracle.sol";
+import {SafetyModule} from "../src/SafetyModule.sol";
+import {EmissionsController} from "../src/EmissionsController.sol";
+import {Ownable} from "@openzeppelin/contracts/access/Ownable.sol";
 
 /// @title DeployToken
-/// @notice Deploys the WRITE token layer and hands it to the timelock. Uses the same `TokenDeployLib` as
-/// `test/TokenBase.t.sol`, so what ships is what the tests exercise.
-/// @dev Run after the vault layer exists (README deployment order). `TickMath` must already be deployed and
-/// linked — `WritePriceOracle` carries a link placeholder and its constructor reverts `Miswired("TICK_MATH")`
-/// if the address is missing or wrong (D-058):
+/// @notice Deploys the WRITE token layer. Uses the same `TokenDeployLib` as `test/TokenBase.t.sol`, so what
+/// ships is what the tests exercise.
+/// @dev Two entry points, because the wiring between them belongs to the timelock (D-098). **The deployer key
+/// never owns anything**: every contract is constructed with the timelock as owner, so the deployer only ever
+/// calls `new`. Each entry point prints the `scheduleBatch` targets and calldata that governance executes next.
 ///
-///   forge script script/DeployToken.s.sol:DeployToken \
+///   forge script script/DeployToken.s.sol:DeployToken --sig "run()" \
 ///     --rpc-url robinhood --broadcast \
 ///     --libraries src/libraries/TickMath.sol:TickMath:0xTHE_DEPLOYED_ADDRESS
 ///
-/// The deployer owns everything during wiring and then transfers ownership to the timelock; the timelock must
-/// call `acceptOwnership()` on each contract to complete the handover (Ownable2Step). Three steps stay
-/// manual because they depend on the launch venue, and they are listed at the end of the run:
-///   1. `escrow.setPool(launchpad)` then `escrow.fundAll()`
-///   2. seed the WRITE/USDG pool and `pool.increaseObservationCardinalityNext(65535)`
-///   3. `oracle.setPool(writeUsdgPool)`
-/// Then, when governance chooses: `cap.setSafetyModule` + `setCapWeightBps` + `setCapMode(SAFETY_MODULE)`,
-/// `fr.setWriteToken` + `setPriceOracle` + `setCurator`, and the BondManager migration.
+/// `TickMath` must already be deployed and linked — `WritePriceOracle` carries a link placeholder and its
+/// constructor reverts `Miswired("TICK_MATH")` if the address is missing or wrong (D-058).
+///
+/// After batch 1 executes, run the second entry point with the addresses printed by the first:
+///
+///   forge script script/DeployToken.s.sol:DeployToken \
+///     --sig "runStaking(address,address)" <WRITE> <EmissionsController> \
+///     --rpc-url robinhood --broadcast --libraries ...
+///
+/// Environment-specific and therefore manual, after batch 2: `escrow.setPool(launchpad)` + `escrow.fundAll()`,
+/// seeding the WRITE/USDG pool and raising its observation cardinality, `oracle.setPool(...)`, and
+/// `oracle.setSequencerFeed(...)`. Then, when governance chooses: the treasury and team vesting schedules,
+/// `CapController.setSafetyModule` + `setCapWeightBps` + `setCapMode(SAFETY_MODULE)`, the FeeRouter WRITE mode,
+/// and the four-call BondManager migration.
 contract DeployToken is Script {
-    function run() external returns (TokenDeployLib.Deployment memory d) {
-        address timelock = vm.envAddress("TIMELOCK_ADDRESS");
-        address treasury = vm.envAddress("TREASURY_ADDRESS");
-        address usdg = vm.envAddress("USDG_ADDRESS");
-        address usdgUsdFeed = vm.envAddress("USDG_USD_FEED");
-        uint256 sanityLow8 = vm.envOr("WRITE_SANITY_LOW_8", uint256(0.005e8));
-        uint256 sanityHigh8 = vm.envOr("WRITE_SANITY_HIGH_8", uint256(5.0e8));
+    function _params() internal view returns (TokenDeployLib.Params memory) {
+        return TokenDeployLib.Params({
+            owner: vm.envAddress("TIMELOCK_ADDRESS"),
+            treasury: vm.envAddress("TREASURY_ADDRESS"),
+            usdg: vm.envAddress("USDG_ADDRESS"),
+            usdgUsdFeed: vm.envAddress("USDG_USD_FEED"),
+            emissionsDuration: 4 * 365 days,
+            sanityLow8: vm.envOr("WRITE_SANITY_LOW_8", uint256(0.005e8)),
+            sanityHigh8: vm.envOr("WRITE_SANITY_HIGH_8", uint256(5.0e8))
+        });
+    }
+
+    /// @notice Stage 1: the five holders and the token. Nothing is wired, and the deployer owns nothing.
+    function run() external returns (TokenDeployLib.Holders memory h, WRITE write) {
+        TokenDeployLib.Params memory p = _params();
 
         vm.startBroadcast();
-        address deployer = msg.sender;
-
-        d = TokenDeployLib.deploy(
-            TokenDeployLib.Params({
-                owner: deployer, // wiring needs a signer; ownership moves to the timelock below
-                treasury: treasury,
-                usdg: usdg,
-                usdgUsdFeed: usdgUsdFeed,
-                emissionsDuration: 4 * 365 days,
-                sanityLow8: sanityLow8,
-                sanityHigh8: sanityHigh8
-            })
-        );
-
-        _assertWiring(d);
-
-        Ownable2Step(address(d.escrow)).transferOwnership(timelock);
-        Ownable2Step(address(d.emissions)).transferOwnership(timelock);
-        Ownable2Step(address(d.treasuryVesting)).transferOwnership(timelock);
-        Ownable2Step(address(d.teamVesting)).transferOwnership(timelock);
-        Ownable2Step(address(d.points)).transferOwnership(timelock);
-        Ownable2Step(address(d.oracle)).transferOwnership(timelock);
-        Ownable2Step(address(d.safetyModule)).transferOwnership(timelock);
-
+        h = TokenDeployLib.deployHolders(p);
+        write = TokenDeployLib.deployToken(h);
         vm.stopBroadcast();
 
-        _report(d, timelock);
-    }
+        _assertMinted(h, write);
+        _assertOwnedBy(p.owner, h);
 
-    /// @dev Fails the deployment rather than leaving a half-wired token layer on chain (D-049).
-    function _assertWiring(TokenDeployLib.Deployment memory d) internal view {
-        require(d.write.totalSupply() == d.write.MAX_SUPPLY(), "supply");
-        require(d.write.balanceOf(address(d.escrow)) == d.escrow.allocation(), "escrow funded");
-        require(d.write.balanceOf(address(d.emissions)) == d.emissions.allocation(), "emissions funded");
-        require(d.write.balanceOf(address(d.treasuryVesting)) == d.treasuryVesting.allocation(), "treasury funded");
-        require(d.write.balanceOf(address(d.teamVesting)) == d.teamVesting.allocation(), "team funded");
-        require(d.write.balanceOf(address(d.points)) == d.points.allocation(), "points funded");
-
-        require(d.escrow.writeToken() == address(d.write), "escrow wired");
-        require(d.emissions.writeToken() == address(d.write), "emissions wired");
-        require(d.treasuryVesting.writeToken() == address(d.write), "treasury wired");
-        require(d.teamVesting.writeToken() == address(d.write), "team wired");
-        require(d.points.writeToken() == address(d.write), "points wired");
-
-        require(!d.treasuryVesting.allowRevocable(), "treasury must be irrevocable");
-        require(d.teamVesting.allowRevocable(), "team must be revocable");
-
-        require(d.emissions.sink() == address(d.safetyModule), "emissions sink");
-        require(d.safetyModule.emissions() == address(d.emissions), "module emissions");
-        require(d.safetyModule.writeToken() == address(d.write), "module token");
-        require(address(d.safetyModule.oracle()) == address(d.oracle), "module oracle");
-        require(d.oracle.writeToken() == address(d.write), "oracle token");
-        require(d.oracle.sanityHigh8() != 0, "sanity band");
-    }
-
-    function _report(TokenDeployLib.Deployment memory d, address timelock) internal pure {
-        console2.log("WRITE               ", address(d.write));
-        console2.log("LiquidityEscrow     ", address(d.escrow));
-        console2.log("EmissionsController ", address(d.emissions));
-        console2.log("Vesting (treasury)  ", address(d.treasuryVesting));
-        console2.log("Vesting (team)      ", address(d.teamVesting));
-        console2.log("PointsDistributor   ", address(d.points));
-        console2.log("WritePriceOracle    ", address(d.oracle));
-        console2.log("SafetyModule        ", address(d.safetyModule));
+        console2.log("WRITE               ", address(write));
+        console2.log("LiquidityEscrow     ", address(h.escrow));
+        console2.log("EmissionsController ", address(h.emissions));
+        console2.log("Vesting (treasury)  ", address(h.treasuryVesting));
+        console2.log("Vesting (team)      ", address(h.teamVesting));
+        console2.log("PointsDistributor   ", address(h.points));
         console2.log("");
-        console2.log("Next, from the timelock:");
-        console2.log(" 1. acceptOwnership() on all seven contracts", timelock);
-        console2.log(" 2. escrow.setPool(launchpad); escrow.fundAll()");
-        console2.log(" 3. seed the WRITE/USDG pool; increaseObservationCardinalityNext(65535)");
-        console2.log(" 4. oracle.setPool(writeUsdgPool)");
-        console2.log(" 5. cap.setSafetyModule + setCapWeightBps + setCapMode(SAFETY_MODULE)");
-        console2.log(" 6. fr.setWriteToken + setPriceOracle + setCurator + setFeeMode");
-        console2.log(" 7. bm.setWriteToken + setRequiredAmountFor x2 + startMigration");
+        console2.log("TIMELOCK BATCH 1 -- scheduleBatch these five, then re-run with runStaking:");
+        _logCall(address(h.escrow), abi.encodeCall(h.escrow.setWriteToken, (address(write))));
+        _logCall(address(h.emissions), abi.encodeCall(h.emissions.setWriteToken, (address(write))));
+        _logCall(address(h.treasuryVesting), abi.encodeCall(h.treasuryVesting.setWriteToken, (address(write))));
+        _logCall(address(h.teamVesting), abi.encodeCall(h.teamVesting.setWriteToken, (address(write))));
+        _logCall(address(h.points), abi.encodeCall(h.points.setWriteToken, (address(write))));
+    }
+
+    /// @notice Stage 3: the oracle and the safety module. Requires batch 1 to have executed.
+    function runStaking(address write, address emissions) external returns (WritePriceOracle oracle, SafetyModule sm) {
+        TokenDeployLib.Params memory p = _params();
+        require(EmissionsController(emissions).writeToken() == write, "batch 1 has not executed");
+
+        TokenDeployLib.Holders memory h;
+        h.emissions = EmissionsController(emissions);
+
+        vm.startBroadcast();
+        (oracle, sm) = TokenDeployLib.deployStaking(p, h, write);
+        vm.stopBroadcast();
+
+        require(Ownable(address(oracle)).owner() == p.owner, "oracle owner");
+        require(Ownable(address(sm)).owner() == p.owner, "module owner");
+        require(sm.emissions() == emissions && sm.writeToken() == write, "module wiring");
+
+        console2.log("WritePriceOracle    ", address(oracle));
+        console2.log("SafetyModule        ", address(sm));
+        console2.log("");
+        console2.log("TIMELOCK BATCH 2 -- scheduleBatch these two:");
+        _logCall(address(oracle), abi.encodeCall(oracle.setSanityBand, (p.sanityLow8, p.sanityHigh8)));
+        _logCall(emissions, abi.encodeCall(EmissionsController.setSink, (address(sm))));
+        console2.log("");
+        console2.log("Then, manually: escrow.setPool + fundAll; seed the pool; oracle.setPool;");
+        console2.log("oracle.setSequencerFeed; the two vesting schedules; the CapController switch.");
+    }
+
+    // ───────────────────────────── asserts ─────────────────────────────
+
+    /// @dev Fails the deployment rather than leaving a mis-minted token layer on chain (D-049).
+    function _assertMinted(TokenDeployLib.Holders memory h, WRITE write) internal view {
+        require(write.totalSupply() == write.MAX_SUPPLY(), "supply");
+        require(write.balanceOf(address(h.escrow)) == h.escrow.allocation(), "escrow funded");
+        require(write.balanceOf(address(h.emissions)) == h.emissions.allocation(), "emissions funded");
+        require(write.balanceOf(address(h.treasuryVesting)) == h.treasuryVesting.allocation(), "treasury funded");
+        require(write.balanceOf(address(h.teamVesting)) == h.teamVesting.allocation(), "team funded");
+        require(write.balanceOf(address(h.points)) == h.points.allocation(), "points funded");
+        require(!h.treasuryVesting.allowRevocable(), "treasury must be irrevocable");
+        require(h.teamVesting.allowRevocable(), "team must be revocable");
+    }
+
+    /// @dev The point of the staged deploy: the deployer must hold no privilege over anything it just created.
+    function _assertOwnedBy(address timelock, TokenDeployLib.Holders memory h) internal view {
+        require(Ownable(address(h.escrow)).owner() == timelock, "escrow owner");
+        require(Ownable(address(h.emissions)).owner() == timelock, "emissions owner");
+        require(Ownable(address(h.treasuryVesting)).owner() == timelock, "treasury owner");
+        require(Ownable(address(h.teamVesting)).owner() == timelock, "team owner");
+        require(Ownable(address(h.points)).owner() == timelock, "points owner");
+    }
+
+    function _logCall(address target, bytes memory data) internal pure {
+        console2.log("  target", target);
+        console2.logBytes(data);
     }
 }

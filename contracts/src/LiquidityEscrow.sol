@@ -77,6 +77,9 @@ contract LiquidityEscrow is Ownable2Step, ReentrancyGuard, IWriteHolder {
         if (writeToken == address(0) || pool_ == address(0)) revert ZeroAddress();
         if (released != 0) revert PoolFrozen(released);
         if (pool_.code.length == 0) revert NotAContract(pool_);
+        // A self- or token-directed pool would park 250 M unreachably: both have code and neither exposes a
+        // pair getter, so the shape probe alone would wave them through (D-098).
+        if (pool_ == address(this) || pool_ == writeToken) revert PoolIsRawAmm(pool_);
         if (_isRawAmm(pool_)) revert PoolIsRawAmm(pool_);
         pool = pool_;
         emit PoolSet(pool_);
@@ -108,12 +111,20 @@ contract LiquidityEscrow is Ownable2Step, ReentrancyGuard, IWriteHolder {
     /// @dev True when `candidate` looks like a bare AMM pool holding WRITE as one of its pair tokens, i.e. a
     /// contract where a plain `transfer` is a donation rather than a deposit (D-094). Decoded as `uint256`
     /// so a non-conforming return value can never revert this probe.
+    /// This recognises the Uniswap v2/v3 `token0()/token1()` shape and the Curve `coins(uint256)` shape. It is
+    /// a typo guard, not a proof of safety: a venue that wraps a pool, or any shape not probed here, still has
+    /// to be verified by whoever writes the timelock proposal (D-098).
     function _isRawAmm(address candidate) internal view returns (bool) {
-        (bool ok0, bytes memory d0) = candidate.staticcall(abi.encodeWithSignature("token0()"));
-        (bool ok1, bytes memory d1) = candidate.staticcall(abi.encodeWithSignature("token1()"));
-        if (!ok0 || !ok1 || d0.length < 32 || d1.length < 32) return false;
-        address t0 = address(uint160(abi.decode(d0, (uint256))));
-        address t1 = address(uint160(abi.decode(d1, (uint256))));
-        return t0 == writeToken || t1 == writeToken;
+        if (_probeHoldsWrite(candidate, abi.encodeWithSignature("token0()"))) return true;
+        if (_probeHoldsWrite(candidate, abi.encodeWithSignature("token1()"))) return true;
+        if (_probeHoldsWrite(candidate, abi.encodeWithSignature("coins(uint256)", uint256(0)))) return true;
+        if (_probeHoldsWrite(candidate, abi.encodeWithSignature("coins(uint256)", uint256(1)))) return true;
+        return false;
+    }
+
+    function _probeHoldsWrite(address candidate, bytes memory call_) internal view returns (bool) {
+        (bool ok, bytes memory data) = candidate.staticcall(call_);
+        if (!ok || data.length < 32) return false;
+        return address(uint160(abi.decode(data, (uint256)))) == writeToken;
     }
 }

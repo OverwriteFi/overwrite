@@ -31,6 +31,10 @@ contract Vesting is Ownable2Step, ReentrancyGuard, IWriteHolder {
     /// @notice False on the treasury instance: `createSchedule` then rejects every revocable schedule.
     bool public immutable allowRevocable;
 
+    /// @notice A schedule must still have this much of its term left when it is created, so no single
+    /// proposal can create a grant that is already (or almost) fully vested (D-091, D-098).
+    uint64 public constant MIN_REMAINING_TERM = 90 days;
+
     // ───────────────────────────── types ─────────────────────────────
 
     struct Schedule {
@@ -72,6 +76,7 @@ contract Vesting is Ownable2Step, ReentrancyGuard, IWriteHolder {
     error NothingToRelease(uint256 id);
     error NotBeneficiary(address caller);
     error NotPendingBeneficiary(address caller);
+    error NoSchedulesYet();
     error RenounceDisabled();
 
     // ───────────────────────────── events ─────────────────────────────
@@ -123,8 +128,11 @@ contract Vesting is Ownable2Step, ReentrancyGuard, IWriteHolder {
         if (beneficiary == address(0)) revert ZeroAddress();
         if (totalAmount == 0) revert ZeroAmount();
         if (revocable && !allowRevocable) revert RevocableNotAllowed();
-        if (duration == 0 || cliffDuration > duration) revert InvalidSchedule();
+        if (duration == 0 || cliffDuration >= duration) revert InvalidSchedule();
         if (uint256(start) + uint256(cliffDuration) < block.timestamp) revert InvalidSchedule();
+        // Backdating `start` to TGE stays legal, but the grant must still have a real term ahead of it:
+        // `cliff == duration` or a term ending now would vest the whole amount in the creating block.
+        if (uint256(start) + uint256(duration) < block.timestamp + MIN_REMAINING_TERM) revert InvalidSchedule();
         uint256 room = unallocated();
         if (totalAmount > room) revert ExceedsUnallocated(totalAmount, room);
 
@@ -169,6 +177,9 @@ contract Vesting is Ownable2Step, ReentrancyGuard, IWriteHolder {
     function reallocateUnallocated(address to, uint256 amount) external onlyOwner nonReentrant {
         if (to == address(0)) revert ZeroAddress();
         if (amount == 0) revert ZeroAmount();
+        // Before any grant exists the "unallocated pool" is the whole bucket, so this would be a drain rather
+        // than the re-granting path it is meant to be (D-098). Its legitimate uses all follow a schedule.
+        if (_schedules.length == 0) revert NoSchedulesYet();
         uint256 room = unallocated();
         if (amount > room) revert ExceedsUnallocated(amount, room);
         reallocated += amount;
@@ -211,6 +222,7 @@ contract Vesting is Ownable2Step, ReentrancyGuard, IWriteHolder {
         address from = s.beneficiary;
         s.beneficiary = msg.sender;
         delete pendingBeneficiary[id];
+        _removeId(from, id);
         _idsOf[msg.sender].push(id);
         emit BeneficiaryChanged(id, from, msg.sender);
     }
@@ -248,6 +260,18 @@ contract Vesting is Ownable2Step, ReentrancyGuard, IWriteHolder {
     }
 
     // ═════════════════════════════ internal ═════════════════════════════
+
+    /// @dev Drops `id` from `who`'s index so a rotated grant is not reported against both addresses.
+    function _removeId(address who, uint256 id) internal {
+        uint256[] storage ids = _idsOf[who];
+        uint256 n = ids.length;
+        for (uint256 i; i < n; ++i) {
+            if (ids[i] != id) continue;
+            ids[i] = ids[n - 1];
+            ids.pop();
+            return;
+        }
+    }
 
     function _schedule(uint256 id) internal view returns (Schedule storage) {
         if (id >= _schedules.length) revert UnknownSchedule(id);

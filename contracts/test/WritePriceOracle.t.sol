@@ -333,7 +333,8 @@ contract WritePriceOracleTest is TokenBaseTest {
     // ═════════════════════════════ fuzz ═════════════════════════════
 
     function testFuzz_writePriceNeverRevertsForAnyTick(int256 tickSeed) public {
-        int24 tick = int24(bound(tickSeed, -600_000, 600_000));
+        // Wide enough to reach the TICK_RANGE guard at +/-887 272, which a +/-600 000 bound never did.
+        int24 tick = int24(bound(tickSeed, -1_000_000, 1_000_000));
         writePool.write(uint32(block.timestamp), tick, WRITE_POOL_LIQ);
         vm.warp(block.timestamp + 31 minutes);
         _usdgFresh();

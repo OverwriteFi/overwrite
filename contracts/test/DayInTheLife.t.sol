@@ -144,7 +144,7 @@ contract DayInTheLifeTest is TokenBaseTest {
         assertEq(write.balanceOf(treasury) - treasuryWriteBefore, expectedWrite - expectedBurn, "the rest to treasury");
         assertEq(usdg.balanceOf(curator) - curatorUsdgBefore, fee2, "the USDG fee is rebated to the curator");
         assertEq(fr.writeBalance(address(vault)), CURATOR_WRITE - expectedWrite);
-        assertEq(write.balanceOf(address(sm)) > 0, true);
+        assertGt(write.balanceOf(address(sm)), 0, "stakers hold their own principal, not fee proceeds");
         // CLAUDE.md rule 7: no fee reaches a token holder as revenue.
         assertEq(usdg.balanceOf(address(sm)), 0, "stakers receive no protocol revenue, ever");
 

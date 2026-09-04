@@ -12,10 +12,12 @@ import {IWriteHolder} from "./interfaces/IWriteHolder.sol";
 /// this constructor directly into the five distribution contracts. There is no mint function, no owner, no
 /// pause and no `ERC20Votes`: after deployment the supply is immutable and nobody has privileged control.
 /// @dev The five amounts are `constant` here rather than constructor arguments (D-059), so the split is
-/// verifiable from the verified source and a deploy script cannot fat-finger it. "Never into an EOA" is
-/// enforced structurally (D-061): every recipient must answer `IWriteHolder.allocation()` with the exact
-/// amount it is about to receive, and an EOA has no such function, so the call reverts. That is stronger
-/// than a `code.length > 0` check, which an EIP-7702 delegated account would pass.
+/// verifiable from the verified source and a deploy script cannot fat-finger it. Every recipient must answer
+/// `IWriteHolder.allocation()` with the exact amount it is about to receive (D-061), which rejects a plain
+/// EOA (no such function) and, more usefully, a contract wired into the wrong bucket. It is a wiring check,
+/// NOT a security boundary: a hostile contract — or an EIP-7702 delegated account whose delegate implements
+/// `allocation()` — can return the right number and then do anything. The addresses are chosen by the
+/// deployer, so the real guarantee is "each recipient declares the exact bucket it is about to receive".
 /// Utility is safety-module staking, bonds, the fee discount and burn, and governance — never revenue
 /// share (CLAUDE.md rule 7).
 contract WRITE is ERC20, ERC20Burnable, ERC20Permit {
@@ -71,6 +73,8 @@ contract WRITE is ERC20, ERC20Burnable, ERC20Permit {
             total += amounts[i];
             _mint(holder, amounts[i]);
         }
+        // Unreachable while the five amounts are `constant`; kept so a future edit to them cannot ship a
+        // supply that does not sum to MAX_SUPPLY.
         if (total != MAX_SUPPLY) revert SupplyMismatch(total, MAX_SUPPLY);
     }
 }

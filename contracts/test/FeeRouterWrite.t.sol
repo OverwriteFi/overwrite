@@ -160,6 +160,9 @@ contract FeeRouterWriteTest is TokenBaseTest {
         uint256 discountedFloor = fee * 8000 / 10_000;
         uint256 exactFloor = discountedFloor * 1e20 / price8;
         assertGe(amount, exactFloor, "never less than the exact amount");
+        // The two ceilings can add at most one 6-decimal USD unit (worth `1e20 / price8` WRITE-wei once
+        // converted) plus one wei from the second rounding -- not two wei.
+        assertLe(amount, exactFloor + 1e20 / price8 + 1, "and no more than the two ceilings can add");
     }
 
     function test_flush_usdgModeIsUnchanged() public {
@@ -246,8 +249,10 @@ contract FeeRouterWriteTest is TokenBaseTest {
         uint256 stakerBefore = write.balanceOf(address(sm));
         fr.flush(address(vault));
         assertEq(write.balanceOf(address(sm)), stakerBefore, "not one token reaches the stakers");
-        assertEq(usdg.balanceOf(address(sm)), 0);
-        assertEq(fee, fee);
+        assertEq(usdg.balanceOf(address(sm)), 0, "and no USDG either");
+        // The fee left the protocol only as a burn and a treasury credit, plus the curator's priced swap.
+        assertGt(fee, 0, "a fee was actually charged");
+        assertEq(sm.totalUnclaimedRewards(), 0, "no reward credit was created by a fee");
     }
 
     // ═════════════════════════════ parameters ═════════════════════════════
@@ -292,15 +297,31 @@ contract FeeRouterWriteTest is TokenBaseTest {
 
     // ═════════════════════════════ fuzz ═════════════════════════════
 
-    function testFuzz_writeFeeSplitConservesTheDebit(uint256 feeSeed) public {
+    /// @dev Drives a real `flush` and observes the three token movements, rather than asserting an identity
+    /// on locally computed numbers -- which would pass with the split deleted from the contract.
+    function testFuzz_flushWriteSplitConservesTheDebit(uint256 feeSeed) public {
         _launchWriteMode();
         _fundCurator(CURATOR_WRITE);
         uint256 fee = bound(feeSeed, 1e6, 100_000e6);
-        (uint256 amount, bool ok) = fr.previewWriteFee(fee);
+
+        usdg.mint(address(ah), fee);
+        vm.prank(address(ah));
+        fr.collect(address(vault), 1, fee);
+
+        (uint256 expected, bool ok) = fr.previewWriteFee(fee);
         assertTrue(ok);
-        uint256 burned = amount * fr.writeBurnShareBps() / fr.BPS();
-        assertEq(burned + (amount - burned), amount, "burn + treasury == the whole debit");
-        assertLe(burned, amount);
+        uint256 supplyBefore = write.totalSupply();
+        uint256 treasuryBefore = write.balanceOf(treasury);
+        uint256 balanceBefore = fr.writeBalance(address(vault));
+
+        fr.flush(address(vault));
+
+        uint256 burned = supplyBefore - write.totalSupply();
+        uint256 toTreasury = write.balanceOf(treasury) - treasuryBefore;
+        uint256 debited = balanceBefore - fr.writeBalance(address(vault));
+        assertEq(debited, expected, "the curator was debited exactly the quoted amount");
+        assertEq(burned + toTreasury, debited, "burn + treasury == the whole debit");
+        assertEq(burned, expected * fr.writeBurnShareBps() / fr.BPS(), "the burn share is exact");
     }
 
     function testFuzz_writeAmountScalesWithTheFee(uint256 a, uint256 b) public {

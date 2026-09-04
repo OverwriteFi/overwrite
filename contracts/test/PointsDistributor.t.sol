@@ -247,6 +247,29 @@ contract PointsDistributorTest is TokenUnitBaseTest {
 
     // ═════════════════════════════ fuzz ═════════════════════════════
 
+    /// @dev Indices spanning several bitmap words, so `index >> 8` and `index & 0xff` are both exercised --
+    /// the arithmetic the `incorrect-shift` lint suppressions ask a reader to take on trust.
+    function test_isClaimed_acrossBitmapWords() public {
+        uint256[4] memory idx = [uint256(0), 255, 256, 700];
+        bytes32[] memory wide = new bytes32[](4);
+        for (uint256 i; i < 4; ++i) {
+            wide[i] = points.leafHash(7, idx[i], claimants[i], amounts[i]);
+        }
+        uint64 start = uint64(block.timestamp);
+        vm.prank(admin);
+        points.setRound(7, MerkleTreeLib.root(wide), ROUND_AMOUNT, start, start + 1 days);
+
+        points.claim(7, idx[2], claimants[2], amounts[2], MerkleTreeLib.proof(wide, 2)); // word 1
+        assertTrue(points.isClaimed(7, 256));
+        assertFalse(points.isClaimed(7, 0), "word 0 untouched");
+        assertFalse(points.isClaimed(7, 255));
+        assertFalse(points.isClaimed(7, 700), "word 2 untouched");
+
+        points.claim(7, idx[1], claimants[1], amounts[1], MerkleTreeLib.proof(wide, 1)); // word 0, top bit
+        assertTrue(points.isClaimed(7, 255));
+        assertFalse(points.isClaimed(7, 0));
+    }
+
     function testFuzz_bitmapMarksExactlyOneIndex(uint256 indexSeed) public {
         _openRound(R1, ROUND_AMOUNT);
         uint256 i = bound(indexSeed, 0, 3);

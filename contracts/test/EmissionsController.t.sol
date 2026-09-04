@@ -3,6 +3,11 @@ pragma solidity 0.8.26;
 
 import {TokenUnitBaseTest} from "./TokenUnitBase.t.sol";
 import {EmissionsController} from "../src/EmissionsController.sol";
+import {WRITE} from "../src/WRITE.sol";
+import {LiquidityEscrow} from "../src/LiquidityEscrow.sol";
+import {Vesting} from "../src/Vesting.sol";
+import {PointsDistributor} from "../src/PointsDistributor.sol";
+import {MockSafetyModuleWiring} from "./mocks/MockSafetyModuleWiring.sol";
 import {Ownable} from "@openzeppelin/contracts/access/Ownable.sol";
 
 contract EmissionsControllerTest is TokenUnitBaseTest {
@@ -147,12 +152,52 @@ contract EmissionsControllerTest is TokenUnitBaseTest {
         emis.setSink(address(sm));
     }
 
-    /// @dev The reverse assert stops a half-wired pair: the candidate must already point back here.
-    function test_setSink_assertsBackReference() public {
+    /// @dev Before the token is wired, `setSink` fails on the token check -- not on either back-reference.
+    function test_setSink_requiresTheTokenFirst() public {
         EmissionsController fresh = new EmissionsController(admin, EMISSIONS_DURATION);
         vm.prank(admin);
         vm.expectRevert(abi.encodeWithSelector(EmissionsController.Miswired.selector, bytes32("WRITE_TOKEN")));
         fresh.setSink(address(sm));
+    }
+
+    /// @dev The reverse assert that actually stops a half-wired pair. Reaching it needs a controller that is
+    /// funded and token-wired but has no sink yet, which only a second full token deployment provides -- the
+    /// previous version of this test reverted on the token check above and proved nothing about either branch.
+    function test_setSink_rejectsASinkPointingElsewhere() public {
+        (EmissionsController unwired, WRITE freshWrite) = _freshFundedController();
+
+        MockSafetyModuleWiring wrongEmissions =
+            new MockSafetyModuleWiring(makeAddr("someOtherController"), address(freshWrite));
+        MockSafetyModuleWiring wrongToken = new MockSafetyModuleWiring(address(unwired), makeAddr("someOtherToken"));
+        MockSafetyModuleWiring correct = new MockSafetyModuleWiring(address(unwired), address(freshWrite));
+
+        vm.startPrank(admin);
+        vm.expectRevert(abi.encodeWithSelector(EmissionsController.Miswired.selector, bytes32("SINK_EMISSIONS")));
+        unwired.setSink(address(wrongEmissions));
+
+        vm.expectRevert(abi.encodeWithSelector(EmissionsController.Miswired.selector, bytes32("SINK_WRITE")));
+        unwired.setSink(address(wrongToken));
+
+        unwired.setSink(address(correct));
+        vm.stopPrank();
+        assertEq(unwired.sink(), address(correct), "a correctly wired sink is accepted");
+    }
+
+    /// @dev A second, independent token deployment: five fresh holders and a fresh WRITE, so the controller
+    /// genuinely holds its 300 M and `setWriteToken` succeeds.
+    function _freshFundedController() internal returns (EmissionsController c, WRITE w) {
+        c = new EmissionsController(admin, EMISSIONS_DURATION);
+        w = new WRITE(
+            WRITE.Holders({
+                liquidity: address(new LiquidityEscrow(admin)),
+                emissions: address(c),
+                treasuryVesting: address(new Vesting(admin, 200_000_000e18, false)),
+                teamVesting: address(new Vesting(admin, 150_000_000e18, true)),
+                points: address(new PointsDistributor(admin, treasury))
+            })
+        );
+        vm.prank(admin);
+        c.setWriteToken(address(w));
     }
 
     // ═════════════════════════════ fuzz ═════════════════════════════

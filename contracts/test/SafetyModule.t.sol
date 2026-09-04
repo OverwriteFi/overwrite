@@ -8,6 +8,7 @@ import {WritePriceOracle} from "../src/WritePriceOracle.sol";
 import {CapController} from "../src/CapController.sol";
 import {Ownable} from "@openzeppelin/contracts/access/Ownable.sol";
 import {ERC4626} from "@openzeppelin/contracts/token/ERC20/extensions/ERC4626.sol";
+import {TimelockController} from "@openzeppelin/contracts/governance/TimelockController.sol";
 
 contract SafetyModuleTest is TokenBaseTest {
     uint256 internal round = 1;
@@ -173,9 +174,92 @@ contract SafetyModuleTest is TokenBaseTest {
         assertApproxEqRel(assets, 700e18, 1e12, "the cooling-down staker took the slash");
     }
 
-    /// @dev The 14-day cooldown dominates the 48 h timelock, so nobody can exit ahead of a queued slash.
-    function test_cooldownDominatesTheTimelockDelay() public {
-        assertGe(sm.COOLDOWN(), 48 hours * 7, "cooldown must dwarf the timelock delay");
+    /// @dev The property, driven through a real 48 h `TimelockController` rather than asserted as
+    /// `COOLDOWN >= 48 hours * 7` — which compared two constants and said nothing about behaviour. A staker
+    /// who reacts the moment a slash is queued still cannot exit before it executes.
+    function test_T14_stakerCannotExitAheadOfAQueuedSlash() public {
+        _fund(staker1, 1_000e18);
+
+        address[] memory proposers = new address[](1);
+        proposers[0] = admin;
+        TimelockController tl = new TimelockController(48 hours, proposers, proposers, address(0));
+
+        vm.prank(admin);
+        sm.transferOwnership(address(tl));
+        bytes memory accept = abi.encodeCall(sm.acceptOwnership, ());
+        vm.prank(admin);
+        tl.schedule(address(sm), 0, accept, bytes32(0), bytes32("a"), 48 hours);
+        vm.warp(block.timestamp + 48 hours);
+        vm.prank(admin);
+        tl.execute(address(sm), 0, accept, bytes32(0), bytes32("a"));
+        assertEq(sm.owner(), address(tl));
+
+        // The slash is queued, and the staker reacts in the same block.
+        bytes memory slashCall = abi.encodeCall(sm.slash, (300e18, shortfallReserve, "ipfs://evidence"));
+        vm.prank(admin);
+        tl.schedule(address(sm), 0, slashCall, bytes32(0), bytes32("s"), 48 hours);
+        uint256 shares = sm.sharesOf(staker1);
+        vm.prank(staker1);
+        uint64 unlockAt = sm.requestUnstake(shares);
+
+        vm.warp(block.timestamp + 48 hours);
+        vm.prank(admin);
+        tl.execute(address(sm), 0, slashCall, bytes32(0), bytes32("s"));
+        assertEq(sm.totalStaked(), 700e18, "the slash landed while the staker was still cooling down");
+
+        // The cooldown still has ~12 days to run, so there was never an exit.
+        assertGt(unlockAt, block.timestamp, "the request had not matured when the slash executed");
+        vm.warp(uint256(unlockAt) + 1);
+        vm.prank(staker1);
+        assertApproxEqRel(sm.unstake(), 700e18, 1e12, "and the staker bears it in full");
+    }
+
+    // ═════════════════════════════ fuzz ═════════════════════════════
+
+    /// @dev A stake-then-unstake round trip must never return more than was put in, for any pool state.
+    function testFuzz_stakeUnstakeRoundTripNeverGains(uint256 seedA, uint256 seedB) public {
+        uint256 a = bound(seedA, 1e12, 1_000_000e18);
+        uint256 b = bound(seedB, 1e12, 1_000_000e18);
+        _fund(staker1, a);
+        _fund(staker2, b);
+
+        uint256 shares = sm.sharesOf(staker2);
+        vm.prank(staker2);
+        uint64 unlockAt = sm.requestUnstake(shares);
+        vm.warp(uint256(unlockAt) + 1);
+        vm.prank(staker2);
+        uint256 out = sm.unstake();
+        assertLe(out, b, "a round trip never profits");
+    }
+
+    /// @dev A slash lands pro rata: the ratio between two stakers is preserved exactly.
+    function testFuzz_slashIsProRataAcrossStakers(uint256 seedA, uint256 seedB, uint256 bpsSeed) public {
+        uint256 a = bound(seedA, 1e18, 1_000_000e18);
+        uint256 b = bound(seedB, 1e18, 1_000_000e18);
+        _fund(staker1, a);
+        _fund(staker2, b);
+
+        uint256 beforeA = sm.stakedOf(staker1);
+        uint256 beforeB = sm.stakedOf(staker2);
+        uint256 cap = sm.totalStaked() * sm.MAX_SLASH_BPS() / sm.BPS();
+        uint256 amount = bound(bpsSeed, 1, cap);
+        vm.prank(admin);
+        sm.slash(amount, shortfallReserve, "ipfs://x");
+
+        uint256 afterA = sm.stakedOf(staker1);
+        uint256 afterB = sm.stakedOf(staker2);
+        assertLe(afterA, beforeA);
+        assertLe(afterB, beforeB);
+        // beforeA/beforeB == afterA/afterB, cross-multiplied to stay in integers.
+        assertApproxEqRel(afterA * beforeB, afterB * beforeA, 1e12, "the split is unchanged by the slash");
+    }
+
+    /// @dev `previewStake` and `previewUnstake` invert each other to within the flooring.
+    function testFuzz_previewsAreInverseWithinRounding(uint256 seed, uint256 assetsSeed) public {
+        _fund(staker1, bound(seed, 1e18, 1_000_000e18));
+        uint256 assets = bound(assetsSeed, 1e6, 1_000_000e18);
+        uint256 shares = sm.previewStake(assets);
+        assertLe(sm.previewUnstake(shares), assets, "the round trip never rounds in the user's favour");
     }
 
     // ═════════════════════════════ slashing (SPEC §14) ═════════════════════════════

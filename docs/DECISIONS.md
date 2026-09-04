@@ -791,8 +791,11 @@ script and `test/TokenBase.t.sol`, so the fixture cannot drift from the deployme
 **Decision.** Every mint recipient implements `IWriteHolder.allocation()`. WRITE's constructor calls it on each
 address and requires the answer to equal the constant it is about to mint.
 
-**Alternatives considered.** `to.code.length > 0` (rejected: an EIP-7702 delegated EOA has code, so the check
-can pass for a wallet; and it cannot catch a *contract* wired into the wrong bucket). Nothing at all, relying on
+**Alternatives considered.** `to.code.length > 0` (rejected: it cannot catch a *contract* wired into the wrong
+bucket, which is the likelier deploy error). **Corrected by D-098:** this record originally claimed the
+handshake is stronger than a code-length check because an EIP-7702 delegated account would pass the latter.
+It passes the handshake too, if its delegate implements `allocation()`. The handshake is a wiring guard, not
+a security boundary. Nothing at all, relying on
 the deploy script (rejected: the mint is irreversible and the timelock is the party making the typo).
 
 **Consequences.** An EOA has no `allocation()`, so the call reverts and the deployment fails.
@@ -1276,3 +1279,110 @@ bug in index-based reward contracts. Invariant I-18 is restated against principa
 (which is exactly true) rather than against `totalUnclaimedRewards` (which drifts), and I-28 bounds credits
 by the surplus plus the dust. Regression tests:
 `test_claimRewards_dustDriftNeverBricksTheLastClaimant`, `test_rewardSurplusBoundsEveryClaim`.
+
+---
+
+## D-098 · 2026-09-04 · Independent review of the WRITE token layer: staged deploy, seven hardening changes, and the tests that were passing without proving anything
+
+Three fresh-context reviews of `b35aeff..HEAD` (fund-loss paths; SPEC/CLAUDE.md conformance; test quality). Two
+of them independently traced every value flow and confirmed **CLAUDE.md rule 7 holds**: no fee, premium,
+settlement or slash proceeds can reach a WRITE holder because they hold or stake WRITE. The curator's USDG
+rebate is a priced swap — the same call debits WRITE worth `feeUSD × (1e4 − discountBps) / 1e4` — and a holder
+who is not `curatorOf[vault]` receives nothing. Emissions are provably capped at the 300 M genesis bucket:
+`_pending()` bounds accrual by `allocation − released − owed`, so WRITE donated to the controller is stranded
+rather than emitted, and there is no deposit path by which revenue could enter. The share math, the Merkle
+accounting and the "a claim never reaches principal" property were each verified analytically and cleared.
+
+**Decision.** Fix everything the reviews found. The substantive changes:
+
+1. **The deploy is staged and the timelock owns everything from birth.** `TokenDeployLib` previously wired the
+   holders as `Params.owner = deployer`, and `DeployToken.s.sol` transferred ownership afterwards with
+   `Ownable2Step.transferOwnership` — which does not take effect until the recipient calls `acceptOwnership`,
+   itself a 48 h-delayed operation. For that whole window one hot key owned all seven contracts and could take
+   250 M from `LiquidityEscrow`, 350 M from the two `Vesting` instances and 100 M from `PointsDistributor` via
+   a same-block round, and could *irreversibly* misdirect the 300 M emissions stream through the one-shot
+   `setSink`. That also contradicted D-060, which describes the wiring going out as a `scheduleBatch`. The
+   library now exposes four stages — `deployHolders`/`deployToken` (deployer), `wireHolders` (timelock batch),
+   `deployStaking` (deployer), `wireStaking` (timelock batch) — with the ordering forced by `SafetyModule`'s
+   constructor assert. The deployer only ever calls `new`. `deploy()` remains as a single-call convenience for
+   the fixture, which pranks the timelock. `test_stagedDeploy_deployerHoldsNoPrivilege` pins it.
+2. **`Vesting` cannot create an already-vested grant.** D-091 recorded a guard against a proposal that unlocks
+   a grant instantly, but `cliffDuration == duration` and `start + cliffDuration == block.timestamp` both
+   passed, and `vestedAmount` then returned the full `totalAmount` in the creating block. Now `cliff < duration`
+   and the term must still have `MIN_REMAINING_TERM` (90 days) left. `reallocateUnallocated` is additionally
+   blocked until at least one schedule exists — before that the "unallocated pool" is the entire bucket, so it
+   would have been a drain rather than the re-granting path it is meant to be, and D-062's "structurally
+   irrevocable" claim about the treasury instance only holds once its schedule exists.
+3. **`LiquidityEscrow.setPool` recognises more than the Uniswap shape.** The probe returned "safe" whenever
+   `token0()` reverted, which admitted a Curve pool, a v4 `PoolManager`, the escrow itself and the token
+   itself — each of which would park 250 M unreachably. It now also probes `coins(uint256)` and rejects
+   `address(this)` and `writeToken` outright. It remains a typo guard, not a proof, and the NatSpec says so.
+4. **A slash voids unstake requests that had already matured.** The NatSpec claimed "a staker cannot dodge a
+   slash", but a standing request opens a 3-day window every 17 days, which overlaps a 48 h execution window
+   about 29 % of the time — so a prepared position lost ~21 %, not 30 %. `unstake` now requires
+   `req.unlockAt > lastSlashAt`. The narrow claim (someone reacting *at* queue time cannot exit) was always
+   true and is now tested behaviourally against a real `TimelockController` rather than by comparing two
+   constants.
+5. **`slash` and `redirectUnallocated` reject `address(this)`.** Slashing to the module decremented
+   `totalStaked` while leaving the tokens where no credit can ever reach them: stakers took the full loss and
+   the WRITE was unrecoverable.
+6. **`FeeRouter` reserves booked fees and requires a curator before funding.** `flush` is permissionless and
+   priced at call time, so a curator could watch the price and pull their prefunded WRITE moments before a
+   flush would have debited it, taking the discount only when it suited them; `withdrawWrite` now keeps
+   `previewWriteFee(pending[vault])` covered while in WRITE mode. `depositWrite` requires `curatorOf[vault]`,
+   since without one there is no withdrawal path at all. `renounceOwnership` is disabled on `FeeRouter` and
+   `BondManager`, matching the rest of the layer.
+7. **`WritePriceOracle` gains the sequencer check it was missing, and a non-zero band floor.** T-05 was a
+   *mitigation* gap, not just a test gap: `observe` interpolates across a sequencer outage and reports a
+   pre-outage tick as fresh, and that stale price sizes every vault's deposit cap. The oracle now carries the
+   same uptime feed and recovery grace as `SettlementOracle`. `setSanityBand` rejects `low8 == 0`, which would
+   have made `_inBand(0)` true and reported a truncated feed answer as a usable price of zero.
+
+Smaller corrections: `extendGrace` reverts `MigrationNotStarted` rather than an unrelated error;
+`Vesting.acceptBeneficiary` drops the id from the previous beneficiary's index; a dead branch in `_scaleTo8`
+is gone; `ScheduleSet` was removed from SPEC §16.1 (it does not exist), `FeeFlushed`'s second parameter is
+`to` rather than `treasury` (in WRITE mode it is the curator), and the two different `PoolSet` signatures are
+now both listed.
+
+**D-061's reasoning was wrong and is corrected.** Both the NatSpec and the record claimed the `allocation()`
+handshake is "stronger than a `code.length > 0` check, which an EIP-7702 delegated account would pass". A
+7702-delegated account whose delegate implements `allocation()` passes the handshake too, as can any hostile
+contract returning the right number. The check is a **wiring guard** — it rejects a plain EOA and, more
+usefully, a contract wired into the wrong bucket — not a security boundary. The addresses are chosen by the
+deployer inside `TokenDeployLib`, which is where the real guarantee comes from.
+
+**Tests that were passing without proving anything**, all found by the test-quality review and all fixed:
+`testFuzz_writeFeeSplitConservesTheDebit` asserted `burned + (amount − burned) == amount` on local variables
+and never called `flush`; `test_setSink_assertsBackReference` reverted on the token check and never reached
+either back-reference branch (`SINK_EMISSIONS` and `SINK_WRITE` had zero occurrences in the whole repo);
+`test_permit_revertsOnExpiredDeadline` signed a garbage digest, so it reverted on the signer check and would
+have passed with the deadline branch deleted; `test_cooldownDominatesTheTimelockDelay` compared two constants;
+`invariant_I20` asserted a bound the handler had already applied with its own `bound()`, so deleting
+`ExceedsSlashCap` would not have failed it; `testFuzz_fund_neverExceedsAllocation` skipped exactly the
+over-allocation case it was named for; `testFuzz_bitmapMarksExactlyOneIndex` kept every index in word 0, so
+`index >> 8` was never exercised; and `testFuzz_writePriceNeverRevertsForAnyTick` bounded the tick to ±600 000
+when the guard it targets fires at ±887 272.
+
+**The invariant handler was measured, not assumed.** At `FOUNDRY_INVARIANT_DEPTH=4000`, `unstake` succeeded 13
+times in 4 096 calls; at the shipped depths every logged run reported `unstakes: 0`. The share-burning path —
+and with it I-21's "no orphaned principal" clause — was never evaluated. The handler gained
+`warpToUnstakeWindow`, a `donate` action for both new suites (their comments claimed donation-resistance was
+the point, but only unit tests covered it), and `slashOverCap`, which deliberately attempts an illegal slash
+on every call so I-20 is proven by the contract.
+
+**Alternatives considered.** For (1), keeping the deployer-owns-then-transfers shape and merely asserting
+`pendingOwner()` (rejected: it documents the window instead of closing it, and SPEC §15's deployer model was
+written for contracts that do not hold 1e27 of token). For (4), accepting the duty-cycle escape and correcting
+the comment (rejected: two lines make the documented property true). For (7), porting RS-02's
+minimum-observations rule (rejected: it would freeze deposits protocol-wide after any quiet half-hour and
+break every fixture that warps days forward — the sequencer feed is the targeted fix, and the depth rule
+already carries manipulation resistance).
+
+**Consequences.** SPEC §11, §12, §14, §16.1, §16.2 and §17 updated; §17 gains I-17…I-41, which existed only in
+the test files and in DECISIONS. THREAT-MODEL.md gains **T-21…T-25** (WRITE price manipulation into the cap,
+bond-migration griefing, emissions misdirection, points root mis-issuance, launchpad destination error) plus
+token-layer notes on T-05, T-11, T-12, T-13, T-14 and T-16 — that file's own §6 requires it to change in the
+same commit as SPEC §13/§15 or the invariant list, and it had not been touched. Four new invariant suites mean
+every contract in the layer now satisfies CLAUDE.md rule 2; `AuctionInvariants` deliberately stays out of WRITE
+mode and the migration (D-097), so `WriteFeeBondInvariants` is the only coverage of either. Tests: 605 → 676,
+green under `FOUNDRY_PROFILE=ci`.

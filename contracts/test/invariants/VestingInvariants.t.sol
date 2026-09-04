@@ -13,6 +13,8 @@ contract VestingInvariants is TokenUnitBaseTest {
         super.setUp();
         address[4] memory people = [makeAddr("b1"), makeAddr("b2"), makeAddr("b3"), makeAddr("b4")];
         handler = new VestingHandler(VestingHandler.Deps({write: write, vesting: teamVesting, admin: admin}), people);
+        // The handler needs a float of its own to exercise the donation action.
+        _grantWrite(address(handler), 1_000e18, 1);
         targetContract(address(handler));
     }
 

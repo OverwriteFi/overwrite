@@ -90,6 +90,11 @@ test/
                             bricked by the WRITE path)
   DayInTheLife.t.sol        one narrative: launch -> stake -> cap switch -> deposit -> auction -> ITM settle -> USDG fee ->
                             WRITE mode -> auction -> OTM settle -> WRITE fee -> emissions -> bond migration -> points claim -> slash
+  TokenHolderGuards.t.sol   the staged deploy holds no deployer privilege, and the holder-side guards and error
+                            branches added by the D-098 review (vesting term bounds, the raw-AMM shapes, T-25)
+  TokenLayerGuards.t.sol    the staking-side guards: slash voiding matured requests, the residual floor, the
+                            FeeRouter fee reservation, the oracle's sequencer check (T-05) and band floor
+  TokenLayer.threats.t.sol  T-11, T-12, T-13, T-16, T-21, T-22, T-23, T-24 for the token layer
   utils/MerkleTreeLib.sol   roots and proofs in Solidity (no JS harness), OZ sorted-pair convention
   invariants/               VaultHandler + VaultInvariants (vault layer) and AuctionHandler + AuctionInvariants (I-3 exact escrow
                             conservation, allocation identity, fee conservation, I-13 bond locks, preview == clear, auction OPEN ⇔
@@ -102,6 +107,12 @@ test/
                             shares and principal vanish together, rewards bounded by emissions released)
                             VestingHandler + VestingInvariants (I-23…I-27: allocated == sum of schedules, the three buckets
                             partition the allocation, released <= vested per schedule, outstanding promises stay funded)
+                            TokenDistributionHandler + TokenDistributionInvariants (I-31…I-35: WRITE's fixed supply, the
+                            points buckets partition, live rounds stay funded, no round overpays, the escrow's release bound)
+                            WriteFeeBondHandler + WriteFeeBondInvariants (I-36…I-41: fee conservation across both modes,
+                            prefunded-WRITE conservation, per-asset bond backing, bonded-implies-requirement, burn-only supply)
+                            -- AuctionInvariants deliberately never enters WRITE mode or the migration (D-097), so this is
+                            the only invariant coverage of either
   mocks/                    MockRiskModule, MockPriceSource, MockSafetyModule, MockAggregatorV3 (phase-aware rounds, doubles as the
                             sequencer and USDG/USD feed), MockUniswapV3Pool (real observation ring: cumulative math, interpolation, OLD)
 ```
@@ -115,11 +126,13 @@ if it is unlinked or points at the wrong contract. Then RiskModule; OptionToken,
 
 The token layer ships later, on its own, and needs nothing from the vault layer redeployed (`script/DeployToken.s.sol`, which calls the same `script/TokenDeployLib.sol` the test fixture uses). Order: the five holders (LiquidityEscrow, EmissionsController, two Vesting instances, PointsDistributor); then `WRITE`, whose constructor mints the whole supply into them and asserts each one's declared `allocation()`; then one `setWriteToken` per holder (a single `scheduleBatch` on mainnet, before any WRITE can move); then `WritePriceOracle` — **which also links the deployed TickMath and repeats the D-058 constructor assert** — and `setSanityBand`; then `SafetyModule`, whose constructor checks both back-references; then `EmissionsController.setSink`. Environment-specific and therefore manual afterwards: `escrow.setPool(launchpad)` + `escrow.fundAll()`, seeding the WRITE/USDG pool and raising its observation cardinality, `oracle.setPool(...)`. Then, when governance chooses: `CapController.setSafetyModule` + `setCapWeightBps` + `setCapMode(SAFETY_MODULE)`; `FeeRouter.setWriteToken` + `setPriceOracle` + `setCurator` + `setFeeMode`; and the four-call BondManager migration. `test/SettlementBase.t.sol` is the executable version.
 
-Measured 2026-09-04 (after the token layer, D-059…D-097): SettlementOracle and AuctionHouse are **byte-identical** to the pre-token build — 22,646 bytes (1,930 headroom) and 23,085 bytes (1,491 headroom) — because nothing was added to either. The new contracts are well inside the limit: WritePriceOracle 9,395, SafetyModule 7,297, Vesting 5,893, PointsDistributor 4,455, WRITE 4,056, EmissionsController 3,461, LiquidityEscrow 2,651; BondManager grew to 11,051 and FeeRouter to 7,638. TickMath deploys separately at 1,357 bytes and now has two consumers.
+Measured 2026-09-04 (after the token layer, D-059…D-097): SettlementOracle and AuctionHouse are **byte-identical** to the pre-token build — 22,646 bytes (1,930 headroom) and 23,085 bytes (1,491 headroom) — because nothing was added to either. The new contracts are well inside the limit (re-measured after the D-098 review fixes): WritePriceOracle 10,026, SafetyModule 7,405, Vesting 6,286, PointsDistributor 4,455, WRITE 4,056, EmissionsController 3,461, LiquidityEscrow 2,739; BondManager grew to 11,067 and FeeRouter to 7,865. TickMath deploys separately at 1,357 bytes and now has two consumers.
 
 Slither 0.11.6 (`python -m slither . --filter-paths "lib/|test/|src/mocks/|script/"` from `contracts/` **with `~/.foundry/bin` on PATH** — without it crytic-compile cannot find `forge` and dies with a bare `FileNotFoundError`) reports 128 results, 3 of them High, and the token layer added none: `weak-prng` is `at % WEEK`, a calendar computation in the untouched `AuctionHouse.canOpen`, and `arbitrary-send-erc20` is the D-023 standing-approval pattern in `FeeRouter.flush` (`from` is the set-once `auctionHouse`, and the amount pulled is exactly `pending[vault]`, which only the AuctionHouse can increment) — now flagged on two lines because the WRITE path adds the curator rebate. The baseline's third High, `uninitialized-state` on `FeeRouter.writePool`, is **gone**: D-084 removed the field. The Medium/Low results are the canonical `divide-before-multiply` in TickMath, `bytes32` equality comparisons, destructured tuple returns, `block.timestamp` comparisons and `nonReentrant`-guarded reentrancy patterns.
 
 `SettlementOracle.registerVault` is one-shot per vault and probes the feed for its earliest reachable round, so the feed must already serve rounds when a vault is registered (D-057). There is no re-point path: a retired feed or pool is handled by `sunset` (D-034).
+
+The token layer was independently reviewed on 2026-09-04 (D-098): the deploy is staged so the deployer key never owns anything, and the review's findings -- a vesting grant that could be fully vested in its creating block, a raw-AMM guard that only knew Uniswap's shape, a ~29 % slash-dodge duty cycle, a missing sequencer check on the WRITE oracle, and eight tests that passed without proving anything -- are all fixed and recorded there.
 
 Not yet built (next phases): VaultFactory, a fork test asserting the whole wiring, the AuctionHouse switch from `capPrice` to `referencePrice` (OQ-005), and **`CoveredCallVault.injectCoverage`** — without it the slash-to-shortfall loop does not close on chain (SPEC §14, D-069's neighbours; see docs/DECISIONS.md). The FeeRouter WRITE mode and the WRITE bond migration are implemented as of v0.6 but stay dormant until the timelock wires the token.
 

@@ -41,6 +41,7 @@ contract WritePriceOracle is Ownable2Step, IWritePriceOracle {
     uint256 public constant USDG_BAND_BPS = 200;
     uint16 public constant MIN_CARDINALITY = 256;
     uint16 public constant MAX_IMPACT_BPS = 1000;
+    uint32 public constant MAX_SEQUENCER_GRACE = 6 hours;
     uint8 public constant SOURCE_NONE = 0;
     uint8 public constant SOURCE_CHAINLINK = 1;
     uint8 public constant SOURCE_TWAP = 2;
@@ -67,6 +68,9 @@ contract WritePriceOracle is Ownable2Step, IWritePriceOracle {
     uint256 public notionalUSDG = 250_000e6;
     uint256 public sanityLow8;
     uint256 public sanityHigh8;
+    /// @notice L2 sequencer uptime feed; `address(0)` disables the check, as in RiskModule's OracleParams.
+    address public sequencerFeed;
+    uint32 public sequencerGrace = 1 hours;
 
     // ───────────────────────────── errors ─────────────────────────────
 
@@ -158,10 +162,21 @@ contract WritePriceOracle is Ownable2Step, IWritePriceOracle {
         notionalUSDG = notionalUSDG_;
     }
 
+    /// @notice Points at the L2 sequencer uptime feed, or clears it with `address(0)`.
+    function setSequencerFeed(address feed, uint32 grace) external onlyOwner {
+        if (grace > MAX_SEQUENCER_GRACE) revert OutOfBounds();
+        emit ParameterChanged(address(this), "sequencerFeed", uint256(uint160(sequencerFeed)), uint256(uint160(feed)));
+        emit ParameterChanged(address(this), "sequencerGrace", sequencerGrace, grace);
+        sequencerFeed = feed;
+        sequencerGrace = grace;
+    }
+
     /// @notice Sets the validity band, in 8-decimal USD. A quote outside it is reported as unavailable, never
     /// clamped: a clamp would let a manipulated price keep feeding the cap at the ceiling value.
+    /// @dev `low8` must be non-zero: `_inBand(0)` would otherwise be true, so a feed answer that truncates to
+    /// zero in `_scaleTo8` would be reported as a usable price of zero (D-098).
     function setSanityBand(uint256 low8, uint256 high8) external onlyOwner {
-        if (high8 == 0 || low8 >= high8) revert OutOfBounds();
+        if (low8 == 0 || high8 == 0 || low8 >= high8) revert OutOfBounds();
         emit ParameterChanged(address(this), "sanityLow8", sanityLow8, low8);
         emit ParameterChanged(address(this), "sanityHigh8", sanityHigh8, high8);
         sanityLow8 = low8;
@@ -245,6 +260,10 @@ contract WritePriceOracle is Ownable2Step, IWritePriceOracle {
     function _twap() internal view returns (uint256 price8, bytes32 reason) {
         address p = pool;
         if (p == address(0)) return (0, "POOL_UNSET");
+        // T-05: `observe` interpolates across a sequencer outage and reports a pre-outage tick as fresh. That
+        // stale price would size every vault's deposit cap, so the window is rejected until the sequencer has
+        // been back for `sequencerGrace` (D-098; mirrors SettlementOracle's own check).
+        if (!_sequencerOk()) return (0, "SEQUENCER_DOWN");
         uint32 window = twapWindow;
 
         uint32[] memory secondsAgos = new uint32[](2);
@@ -277,6 +296,20 @@ contract WritePriceOracle is Ownable2Step, IWritePriceOracle {
         }
     }
 
+    /// @dev Disabled while `sequencerFeed == 0`. An unreachable feed counts as down, as in SettlementOracle.
+    function _sequencerOk() internal view returns (bool) {
+        address feed = sequencerFeed;
+        if (feed == address(0)) return true;
+        try AggregatorV3Interface(feed).latestRoundData() returns (
+            uint80, int256 answer, uint256 startedAt, uint256, uint80
+        ) {
+            if (answer != 0 || startedAt == 0 || startedAt > block.timestamp) return false;
+            return block.timestamp - startedAt >= sequencerGrace;
+        } catch {
+            return false;
+        }
+    }
+
     /// @dev USDG/USD, banded to ±200 bps of par. A depegged quote asset makes the pool price meaningless.
     function _usdgUsd() internal view returns (uint256 price8, bool ok) {
         try usdgUsdFeed.latestRoundData() returns (
@@ -297,11 +330,8 @@ contract WritePriceOracle is Ownable2Step, IWritePriceOracle {
     function _scaleTo8(uint256 value, uint8 dec) internal pure returns (uint256, bool) {
         if (value > type(uint128).max) return (0, false);
         if (dec == 8) return (value, true);
-        if (dec < 8) {
-            if (dec > 8 || 8 - dec > 30) return (0, false);
-            return (value * (10 ** (8 - dec)), true);
-        }
-        if (dec - 8 > 30) return (0, false);
+        if (dec < 8) return (value * (10 ** (8 - dec)), true); // dec < 8 bounds the exponent at 8
+        if (dec - 8 > 30) return (0, false); // an absurd feed decimals value, not a real Chainlink aggregator
         return (value / (10 ** (dec - 8)), true);
     }
 

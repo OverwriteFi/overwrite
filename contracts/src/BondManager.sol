@@ -78,8 +78,10 @@ contract BondManager is IBondManager, Ownable2Step, ReentrancyGuard {
     error AssetNotAccepted(BondAsset asset);
     error RequirementUnset(BondAsset asset, BondKind kind);
     error MigrationStarted();
+    error MigrationNotStarted();
     error OutOfBounds();
     error Miswired(bytes32 what);
+    error RenounceDisabled();
 
     // ───────────────────────────── events (SPEC §16.1) ─────────────────────────────
 
@@ -291,11 +293,16 @@ contract BondManager is IBondManager, Ownable2Step, ReentrancyGuard {
 
     /// @notice Extends the grace window. Can only move later, never earlier.
     function extendGrace(uint64 newEndsAt) external onlyOwner {
-        if (migrationEndsAt == 0) revert NoWithdrawalPending();
+        if (migrationEndsAt == 0) revert MigrationNotStarted();
         if (newEndsAt <= migrationEndsAt) revert OutOfBounds();
         if (newEndsAt > uint64(block.timestamp) + MAX_GRACE) revert OutOfBounds();
         emit ParameterChanged(address(this), "migrationEndsAt", migrationEndsAt, newEndsAt);
         migrationEndsAt = newEndsAt;
+    }
+
+    /// @dev Renouncing would freeze `slashBond`, `setRequiredAmount` and the migration forever.
+    function renounceOwnership() public view override onlyOwner {
+        revert RenounceDisabled();
     }
 
     function setTreasury(address treasury_) external onlyOwner {

@@ -158,10 +158,19 @@ contract LiquidityEscrowTest is TokenUnitBaseTest {
     function testFuzz_fund_neverExceedsAllocation(uint256[4] memory amounts) public {
         vm.prank(admin);
         escrow.setPool(address(launchpad));
+        uint256 cap = escrow.allocation();
         uint256 sent;
         for (uint256 i; i < 4; ++i) {
-            uint256 a = bound(amounts[i], 0, 100_000_000e18);
-            if (a == 0 || sent + a > escrow.allocation()) continue;
+            uint256 a = bound(amounts[i], 1, 100_000_000e18);
+            if (sent + a > cap) {
+                // The case the test is named for: the contract must reject it, not the harness.
+                // README:75 -- read `cap` into a local, or the view call consumes the prank.
+                bytes memory err = abi.encodeWithSelector(LiquidityEscrow.ExceedsAllocation.selector, sent + a, cap);
+                vm.prank(admin);
+                vm.expectRevert(err);
+                escrow.fund(a);
+                continue;
+            }
             vm.prank(admin);
             escrow.fund(a);
             sent += a;

@@ -26,6 +26,7 @@ contract VestingHandler is Test {
     uint256 public released;
     uint256 public revoked;
     uint256 public reallocations;
+    uint256 public donations;
 
     modifier count() {
         calls++;
@@ -43,8 +44,10 @@ contract VestingHandler is Test {
         uint256 room = vesting.unallocated();
         if (room == 0) return;
         uint256 amount = bound(amountSeed, 1, room);
-        uint64 duration = uint64(bound(durationSeed, 1 days, 2000 days));
-        uint64 cliff = uint64(bound(cliffSeed, 0, duration));
+        // The contract requires a real term ahead of the grant and `cliff < duration` (D-098).
+        uint64 minTerm = vesting.MIN_REMAINING_TERM();
+        uint64 duration = uint64(bound(durationSeed, uint256(minTerm) + 1 days, 2000 days));
+        uint64 cliff = uint64(bound(cliffSeed, 0, duration - 1));
 
         vm.prank(admin);
         vesting.createSchedule(beneficiaries[seed % 4], uint64(block.timestamp), cliff, duration, amount, true);
@@ -74,9 +77,19 @@ contract VestingHandler is Test {
     function reallocate(uint256 amountSeed) external count {
         uint256 room = vesting.unallocated();
         if (room == 0) return;
+        // Blocked until at least one grant exists, so it is a re-granting path and not a genesis drain (D-098).
+        if (vesting.scheduleCount() == 0) return;
         vm.prank(admin);
         vesting.reallocateUnallocated(admin, bound(amountSeed, 1, room));
         reallocations++;
+    }
+
+    /// @dev A donation must not expand `unallocated()` — the property I-24 states.
+    function donate(uint256 amount) external count {
+        uint256 bal = write.balanceOf(address(this));
+        if (bal == 0) return;
+        write.transfer(address(vesting), bound(amount, 1, bal));
+        donations++;
     }
 
     function warp(uint256 dt) external count {

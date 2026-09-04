@@ -27,8 +27,11 @@ import {IWritePriceOracle} from "./interfaces/IWritePriceOracle.sol";
 /// as principal and a slash can never consume them. Emissions are pulled, never pushed (D-074), and
 /// emissions accruing while nobody is staked are parked in `unallocatedRewards` rather than being handed to
 /// the first staker who arrives (D-075).
-/// A staker cannot dodge a slash: the 14-day cooldown dominates the 48 h timelock delay, so anyone reacting
-/// to a publicly queued slash proposal can exit no earlier than 14 days after it has executed.
+/// A staker cannot dodge a slash. The 14-day cooldown dominates the 48 h timelock delay, so anyone reacting
+/// to a queued proposal can exit no earlier than 14 days after it executes. That alone is not enough: a
+/// staker holding a standing request has a 3-day claim window every 17 days, which would overlap a 48 h
+/// execution window about 29 % of the time. So a slash also voids every request that matured before it
+/// (`unlockAt <= lastSlashAt`); those stakers must re-request and serve a fresh cooldown (D-098).
 contract SafetyModule is Ownable2Step, ReentrancyGuard, ISafetyModule {
     using SafeERC20 for IERC20;
 
@@ -94,6 +97,7 @@ contract SafetyModule is Ownable2Step, ReentrancyGuard, ISafetyModule {
     error ExceedsSlashCap(uint256 amount, uint256 cap);
     error SlashTooSoon(uint64 allowedAt);
     error SlashWouldWipe();
+    error RequestVoidedBySlash(uint64 lastSlashAt);
     error RenounceDisabled();
 
     // ───────────────────────────── events (SPEC §16.1) ─────────────────────────────
@@ -169,6 +173,9 @@ contract SafetyModule is Ownable2Step, ReentrancyGuard, ISafetyModule {
         if (block.timestamp < req.unlockAt) revert CooldownActive(req.unlockAt);
         uint64 closesAt = req.unlockAt + uint64(CLAIM_WINDOW);
         if (block.timestamp > closesAt) revert ClaimWindowClosed(closesAt);
+        // A slash that landed after this request matured voids it, so a standing request cannot be used to
+        // sit permanently one block away from an exit (D-098).
+        if (req.unlockAt <= lastSlashAt) revert RequestVoidedBySlash(lastSlashAt);
 
         _accrue();
         _harvest(msg.sender);
@@ -221,7 +228,9 @@ contract SafetyModule is Ownable2Step, ReentrancyGuard, ISafetyModule {
     /// pro-rata on every staker, including everyone in cooldown.
     function slash(uint256 amount, address recipient, string calldata evidenceURI) external onlyOwner nonReentrant {
         if (amount == 0) revert ZeroAmount();
-        if (recipient == address(0)) revert ZeroAddress();
+        // `address(this)` would decrement `totalStaked` while leaving the tokens here, where no credit can
+        // ever reach them: the stakers take the loss and the WRITE is unrecoverable (D-098).
+        if (recipient == address(0) || recipient == address(this)) revert ZeroAddress();
         _accrue();
 
         uint256 staked = totalStaked;
@@ -248,7 +257,7 @@ contract SafetyModule is Ownable2Step, ReentrancyGuard, ISafetyModule {
 
     /// @notice Sends emissions that accrued while nothing was staked to a timelock-chosen address.
     function redirectUnallocated(address to) external onlyOwner nonReentrant returns (uint256 amount) {
-        if (to == address(0)) revert ZeroAddress();
+        if (to == address(0) || to == address(this)) revert ZeroAddress();
         _accrue();
         amount = unallocatedRewards;
         if (amount == 0) revert ZeroAmount();
