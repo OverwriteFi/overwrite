@@ -752,3 +752,527 @@ link. `test_D058_constructorRejectsUnlinkedOrWrongTickMath` etches over `address
 Gas: one `DELEGATECALL` per TWAP evaluation (`getSqrtRatioAtTick` is called once per `_poolTwap`), which leaves
 `test_T07_settleGasBound` far inside its 1.5 M bound. D-055 (the v4-core port, no assembly) is unchanged; this only changes how
 it is deployed.
+
+---
+
+## D-059 · 2026-09-04 · The WRITE supply split lives in the token as constants
+
+**Decision.** `WRITE.sol` carries the five bucket sizes as `constant`s (250 M liquidity, 300 M emissions, 200 M
+treasury, 150 M team, 100 M points) summing to `MAX_SUPPLY = 1e27`; the constructor takes only the five
+recipient *addresses*. `ERC20 + ERC20Burnable + ERC20Permit`, no owner, no mint, no pause, no `ERC20Votes`.
+
+**Alternatives considered.** Passing the amounts as constructor arguments (rejected: the split then lives only
+in a deploy script, so a fat-fingered argument is unverifiable from the verified source, and Blockscout readers
+cannot check the tokenomics against the bytecode). `ERC20Votes` (rejected: governance is a timelock with one
+hardware-wallet EOA, D-003; checkpoints would tax every transfer permanently for dead code — if voting ever
+ships, an `ERC20Wrapper + ERC20Votes` vWRITE adds it with zero change to WRITE).
+
+**Consequences.** `docs/TOKENOMICS.md` and the contract agree by construction.
+`test_constructor_allocationsSumToMaxSupply` and `test_noMintOrOwnerSelectorsExist` pin it.
+
+## D-060 · 2026-09-04 · The mint-into-contracts circularity is resolved by set-once wiring, not a bootstrap
+
+**Decision.** The five holders deploy first knowing nothing about WRITE; WRITE's constructor mints into them;
+then one `setWriteToken` per holder wires the token back. On mainnet the five calls go out as a single
+`TimelockController.scheduleBatch`, executed before any WRITE can move. This is the existing D-044 idiom.
+
+**Alternatives considered.** A `TokenBootstrap` contract doing everything atomically in one transaction
+(rejected: a new fund-adjacent contract to audit, plus an address-prediction pattern; its post-mint assertions
+live equally well in `script/DeployToken.s.sol` and `test_e2e_dayInTheLife`, where they cost nothing on chain).
+CREATE2 pre-computation so every holder could hold `write` as an `immutable` (rejected: the holders' addresses
+feed WRITE's constructor arguments and WRITE's address feeds theirs — a two-way dependency needing a bespoke
+deployer anyway).
+
+**Consequences.** `script/TokenDeployLib.sol` is the single description of the sequence, shared by the deploy
+script and `test/TokenBase.t.sol`, so the fixture cannot drift from the deployment.
+
+## D-061 · 2026-09-04 · "Never into an EOA" is enforced by an `allocation()` handshake, not `code.length`
+
+**Decision.** Every mint recipient implements `IWriteHolder.allocation()`. WRITE's constructor calls it on each
+address and requires the answer to equal the constant it is about to mint.
+
+**Alternatives considered.** `to.code.length > 0` (rejected: an EIP-7702 delegated EOA has code, so the check
+can pass for a wallet; and it cannot catch a *contract* wired into the wrong bucket). Nothing at all, relying on
+the deploy script (rejected: the mint is irreversible and the timelock is the party making the typo).
+
+**Consequences.** An EOA has no `allocation()`, so the call reverts and the deployment fails.
+A holder in the wrong slot reverts `AllocationMismatch`. `test_constructor_revertsOnEOARecipient` and
+`test_constructor_revertsOnAllocationMismatch` cover both.
+
+## D-062 · 2026-09-04 · Two `Vesting` deployments, so the treasury grant is structurally irrevocable
+
+**Decision.** `Vesting` takes `allocation` and `allowRevocable` as immutables and is deployed twice: treasury
+(200 M, `allowRevocable = false`) and team (150 M, `allowRevocable = true`). `createSchedule` rejects a
+revocable schedule on an instance that does not allow them. Funding asserts use `>=`, never `==`, and no
+accounting term reads `balanceOf`.
+
+**Alternatives considered.** One 350 M contract with a per-schedule `revocable` flag (rejected: the treasury
+grant would then be unrevoked only by policy, not by construction, and a single wrong flag in one proposal
+would be enough).
+
+**Consequences.** WRITE has five recipients rather than four.
+`test_createSchedule_treasuryInstanceRejectsRevocable` pins the guarantee.
+
+## D-063 · 2026-09-04 · Deploy order: holders, token, wiring, oracle, module, sink
+
+**Decision.** `TokenDeployLib.deploy` runs: five holders → `WRITE` → five `setWriteToken` →
+`WritePriceOracle` + `setSanityBand` → `SafetyModule` → `EmissionsController.setSink`. Each later step asserts
+the earlier ones: the module's constructor checks both back-references and `setSink` checks the reverse.
+
+**Alternatives considered.** Deploying the module before the oracle and pointing it later (rejected: the
+constructor assert is the cheapest place to catch a miswiring, per D-049).
+
+**Consequences.** Pool-dependent steps (`escrow.setPool`, `escrow.fundAll`, `oracle.setPool`) stay outside the
+library because they depend on the launch venue; the deploy script prints them as the operator's next actions.
+
+## D-064 · 2026-09-04 · One canonical `IWritePriceOracle` that never reverts
+
+**Decision.** `writePrice() → (price8, ok)`, `usdValueOfWrite(uint256) → (usd6, ok)`,
+`writeForUSD(uint256) → (writeWei, ok)`, `previewPrice() → (price8, reason, source)`. Every view follows
+`IPriceSource.capPrice`'s never-reverting shape, so no consumer needs a try/catch around it.
+
+**Alternatives considered.** A reverting oracle with consumer-side try/catch (rejected: two consumers with
+opposite needs would each implement the wrapping differently, which is exactly the seam where a bug hides).
+
+**Consequences.** `SafetyModule` turns `!ok` into a zero value, `FeeRouter` turns it into a USDG fallback, and
+`previewPrice` makes "why is there no price" answerable from chain data.
+
+## D-065 · 2026-09-04 · Decimal conversion lives in the oracle, not in its consumers
+
+**Decision.** `usdValueOfWrite` floors (18 + 8 − 20 = 6 decimals) and `writeForUSD` ceils (6 + 20 − 8 = 18).
+Neither `SafetyModule` nor `FeeRouter` repeats the bridge.
+
+**Alternatives considered.** Each consumer doing its own `mulDiv` (rejected: the same conversion written twice
+is the classic place for an off-by-1e12, and the two call sites want opposite rounding).
+
+**Consequences.** The rounding direction is stated once, next to the reasoning: understating the safety module
+understates the deposit cap (conservative), and overstating a WRITE fee favours the protocol.
+
+## D-066 · 2026-09-04 · The WRITE price sanity band is a validity band and is mandatory
+
+**Decision.** `setPool` reverts `SanityBandRequired` while `sanityHigh8 == 0`. A quote outside
+`[sanityLow8, sanityHigh8]` is reported as *unavailable*, never clamped to the bound.
+
+**Alternatives considered.** Clamping to the bound (rejected: a clamped price still feeds the deposit cap at
+the ceiling value, which is precisely the outcome a manipulator wants). Making the band optional (rejected: at
+launch there is no Chainlink feed to deviate against, so the ceiling is the only thing bounding a sustained
+cross-window pump that would inflate every vault's cap).
+
+**Consequences.** Launch proposal `sanityLow8 = 0.005e8`, `sanityHigh8 = 5.00e8` at a $0.10 launch: wide enough
+for honest price discovery, tight enough that a pump cannot inflate caps by more than ~50×. The numbers are a
+founder call recorded in `docs/TOKENOMICS.md`.
+
+## D-067 · 2026-09-04 · The oracle prices Chainlink-first, TWAP-second, and bands both
+
+**Decision.** `writePrice` tries Chainlink (positive answer, fresh within `CL_MAX_STALE = 26 h`,
+`answeredInRound >= roundId`, decimals normalised to 8), then the pool TWAP, then reports no price. The sanity
+band applies to whichever source answered.
+
+**Alternatives considered.** Trusting Chainlink unconditionally once configured (rejected: a stale feed would
+silently freeze every deposit when a working TWAP was available). Banding only the TWAP (rejected: a feed
+misconfiguration deserves the same guard).
+
+**Consequences.** `chainlinkFeed` ships as `address(0)`, so the TWAP carries the whole load at launch;
+`setChainlinkFeed` is the timelock switch for when a real feed exists.
+
+## D-068 · 2026-09-04 · `setPool` asserts the pair, the fee tier, the cardinality and the history
+
+**Decision.** `WritePriceOracle.setPool` requires `{token0, token1} == {WRITE, USDG}`, a fee in
+`{500, 3000, 10000}`, `observationCardinalityNext >= 256`, and a successful `observe([window, 0])` probe. The
+orientation is cached in `writeIsToken1`, read from the pool and never inferred from address ordering.
+
+**Alternatives considered.** A "minimum observations in the window" rule at read time (rejected: it would
+freeze deposits protocol-wide after any half-hour without a WRITE swap, and break every inherited fixture that
+warps days forward; manipulation resistance is already carried by `OracleMath.depthOk` over harmonic-window
+liquidity, the D-018 property, plus `observe`'s own `OLD` revert).
+
+**Consequences.** A freshly created pool is rejected at configuration time rather than silently reporting no
+price at the first read. `WritePriceOracle` links the same deployed `TickMath` and repeats the D-058
+constructor assert, so `foundry.toml`'s `libraries` entry now has two consumers.
+
+## D-069 · 2026-09-04 · `SafetyModule.valueUSD()` returns zero on an unavailable price, and never reverts
+
+**Decision.** `valueUSD()` returns 0 when the oracle has no price; `valueUSDView()` carries the flag.
+
+**Alternatives considered.** Reverting (rejected: `CapController.vaultCapUSD` is a public view the frontend and
+keepers read, so a revert makes the entire cap system unreadable rather than merely closed — both fail closed,
+only one keeps the views answerable).
+
+**Consequences.** The failure mode changes shape and the implementer must not miss it: with `cap6 == 0`,
+`remainingDepositAssets` returns `(0, true)`, so `deposit()` reverts with OpenZeppelin's
+`ERC4626ExceededMaxDeposit`, **not** `CapPriceUnavailable`. Pinned by
+`test_valueUSD_zeroClosesDepositsViaTheCap`.
+
+## D-070 · 2026-09-04 · `ISafetyModule` is not extended
+
+**Decision.** The interface keeps its single `valueUSD()` member. `totalStaked()` and
+`safetyModuleValueUSD()` (SPEC §12's name for the same number) live on the concrete `SafetyModule` and are read
+through the concrete type in tests.
+
+**Alternatives considered.** Adding both to the interface (rejected: `MockSafetyModule` satisfies it with a
+bare public state variable, and every fixture in the tree imports that mock; widening the interface for one
+alias is churn across the whole test tree for no consumer benefit — `CapController` needs only `valueUSD`).
+
+**Consequences.** `test/mocks/MockSafetyModule.sol`, `Base.t.sol` and `AuctionBase.t.sol` are untouched by this
+change, and `CapControllerTest` keeps its isolation.
+
+## D-071 · 2026-09-04 · The safety module is share-based; SPEC §14's "sWRITE 1:1" is amended
+
+**Decision.** Staking credits non-transferable internal shares over an explicit `totalStaked` accumulator, with
+`DECIMALS_OFFSET = 6` matching the vault. A slash reduces `totalStaked` and leaves `totalShares` alone, so the
+loss lands pro rata. **This amends `SPEC.md` §14**: "mints sWRITE 1:1" becomes "credits non-transferable
+shares; 1:1 at genesis, pro rata after any slash".
+
+**Alternatives considered.** A real 1:1 `sWRITE` ERC-20 (rejected: the peg breaks the instant a slash lands, so
+either the token stops being 1:1 or every balance must be rewritten — the first is a lie, the second is
+unbounded gas). A balance-based ledger pro-rating every account on slash (rejected: same unbounded loop).
+
+**Consequences.** Because `totalStaked` is an accumulator and never `balanceOf`, a donation cannot move the
+share price — proven by `test_stake_donationDoesNotMoveSharePrice`. The virtual offset is kept for consistency
+with `CoveredCallVault` rather than out of necessity.
+
+## D-072 · 2026-09-04 · `UnstakeRequest.shares` is `uint256`
+
+**Decision.** The cooldown struct stores shares as a full `uint256`.
+
+**Alternatives considered.** Packing it into `uint128` next to `unlockAt` (rejected: every slash raises the
+shares-per-asset multiplier by `1/0.7`, so after roughly ninety maximum slashes a large holder's `toUint128()`
+would revert and that account could never open an unstake request again — a permanent, silent lockout to save
+one storage slot on one struct per account).
+
+**Consequences.** One extra slot per account with a live request.
+
+## D-073 · 2026-09-04 · `MIN_RESIDUAL_STAKE` blocks only the crossing, not every slash below it
+
+**Decision.** `slash` reverts `SlashWouldWipe` when `staked > FLOOR && staked - amount < FLOOR`. A pool already
+below the floor stays slashable.
+
+**Alternatives considered.** A flat "no slash when `totalStaked < FLOOR`" (rejected: it disables slashing
+exactly when the module is weakest, which is when it is most likely to be needed).
+
+**Consequences.** The share-price divisor can never be driven to zero by slashing, while the backstop stays
+usable in the tail.
+
+## D-074 · 2026-09-04 · Emissions are pulled by the sink, never pushed
+
+**Decision.** `EmissionsController.claim()` is `onlySink`; `SafetyModule._accrue()` calls it, and the
+permissionless `SafetyModule.poke()` is the liveness path. The module checks `emissions.sink() == address(this)`
+before claiming, so staking works in the deployment window before `setSink` has executed.
+
+**Alternatives considered.** A permissionless `drip()` that pushes tokens into the module (rejected: the stake
+asset *is* the reward asset, so a push forces the module to distinguish principal from rewards by looking at
+its own balance — the exact accounting that lets a slash silently consume unclaimed rewards).
+
+**Consequences.** `invariant_I19_totalStakedIsNotTheBalance` states the property the pull model preserves.
+
+## D-075 · 2026-09-04 · Emissions accrued while nobody is staked are parked, not jackpotted
+
+**Decision.** When `totalShares == 0`, pulled emissions go to `unallocatedRewards`, and only the timelock can
+move them, via `redirectUnallocated`.
+
+**Alternatives considered.** Crediting the index anyway (rejected: division by zero). Not pulling at all and
+leaving the tokens in the controller (rejected: the controller accrues on `rate × Δt` independently of its
+balance, so the skipped amount would be unpayable forever). Letting the first staker take the backlog
+(rejected: this is the classic MasterChef bug — a whale who stakes one block before a poke harvests weeks of
+emissions).
+
+**Consequences.** `test_emissions_unallocatedWhileNobodyStaked` asserts the first staker inherits nothing.
+
+## D-076 · 2026-09-04 · The emissions schedule is bounded at construction and its end time is immutable
+
+**Decision.** `EmissionsController`'s constructor enforces `MIN_DURATION = 365 days` and
+`MAX_DURATION = 3650 days`, and `MAX_RATE` is the whole bucket over `MIN_DURATION`. `endTime` is immutable;
+there is no `setEndTime`. `setRate(0)` stops the stream and `setRate` restarts it.
+
+**Alternatives considered.** An unbounded constructor duration (rejected: a one-day duration produces a rate
+hundreds of times above what `setRate` would ever accept, draining 300 M in a day — the bound and the setter
+cap must agree). A mutable `endTime` (rejected: a second mutable time axis buys nothing once the rate is
+settable, and it carries a dead-window resurrection subtlety).
+
+**Consequences.** `test_constructor_enforcesMinAndMaxDuration` and `test_noSetEndTimeSelectorExists` pin both.
+
+## D-077 · 2026-09-04 · A rate change is never retroactive
+
+**Decision.** `setRate` checkpoints first: elapsed time is moved into `owed` at the old rate before the new
+rate takes effect.
+
+**Alternatives considered.** Recomputing accrual from `lastAccrual` at the new rate (rejected: it silently
+reprices time that has already passed, in either direction).
+
+**Consequences.** `test_setRate_isNeverRetroactive` asserts the first week keeps its original rate across a
+doubling.
+
+## D-078 · 2026-09-04 · The module's oracle is re-settable; its token and controller are immutable
+
+**Decision.** `SafetyModule.setOracle` is `onlyOwner` and asserts the candidate quotes the same token.
+`writeToken` and `emissions` stay immutable.
+
+**Alternatives considered.** An immutable oracle (rejected: a dead oracle would freeze every vault's deposits
+protocol-wide with no fix short of redeploying the module and re-staking everyone). Precedent:
+`CapController.setPriceSource`, D-039.
+
+**Consequences.** `renounceOwnership` is disabled on the module: an ownerless SafetyModule could never slash,
+which is its entire purpose.
+
+## D-079 · 2026-09-04 · A 14-day interval between slashes, on top of the 30 % per-event cap
+
+**Decision.** `slash` requires `block.timestamp >= lastSlashAt + 14 days` as well as
+`amount <= 30 % of totalStaked`. It takes an `evidenceURI`, matching `BondManager.slashBond` and SPEC §14.
+
+**Alternatives considered.** The per-call cap alone (rejected: three consecutive timelock executions would
+remove 65.7 % of the stake, which is not what "≤ 30 % per event" means; SPEC §14 specifies both limits).
+
+**Consequences.** The user-facing request named a two-argument `slash(amount, recipient)`; the SPEC form with
+`evidenceURI` is implemented instead, and the extra rate limit is flagged in the plan as an addition.
+The 14-day cooldown also dominates the 48 h timelock delay, so a staker cannot exit ahead of a queued slash —
+`test_cooldownDominatesTheTimelockDelay` states it, `test_cooldownStakeIsStillSlashable` demonstrates it.
+
+## D-080 · 2026-09-04 · The WRITE bond requirement is a fixed token amount, never oracle-denominated
+
+**Decision.** `requiredAmountOf[WRITE][kind]` is an 18-decimal token amount set by the timelock. `BondManager`
+imports no oracle and performs no cross-asset arithmetic.
+
+**Alternatives considered.** A USD-denominated requirement converted at read time (rejected: `hasActiveMMBond`
+is called inside `AuctionHouse.bid` with no try/catch, so a cheap TWAP push on a young token's own pool — or a
+merely unavailable price — would un-bond every competing market maker at once and collapse the clearing price;
+`AuctionHouse` is also off-limits for modification).
+
+**Consequences.** The requirement drifts against USD and must be re-pegged by 48 h governance; the cadence is
+an open item in `docs/TOKENOMICS.md`.
+
+## D-081 · 2026-09-04 · The bond migration is four separately visible timelock calls
+
+**Decision.** `setWriteToken` → `setRequiredAmountFor(WRITE, MM, …)` → `setRequiredAmountFor(WRITE, CURATOR, …)`
+→ `startMigration(graceSeconds)`, which reverts `RequirementUnset` if either requirement is still zero.
+`startMigration` is one-way and bounded by `MAX_GRACE = 90 days`; `extendGrace` may only move the deadline
+later. D-007's value is 30 days.
+
+**Alternatives considered.** A single `setBondAsset(asset, amounts…)` call (rejected: a half-configured
+migration would un-bond every market maker the moment it executed, and one large call is harder to review in a
+timelock queue than four small ones).
+
+**Consequences.** Per-asset legs mean `usdg` stays `immutable` with the same getter, so
+`AuctionHouse`'s constructor assert still passes and the AuctionHouse is not recompiled.
+
+## D-082 · 2026-09-04 · The bond lock gates qualification, not a named asset; the cooldown is waived, the lock never
+
+**Decision.** A market maker with active locks may withdraw a leg only while some *other* accepted leg still
+keeps it bonded. A leg in a de-accepted asset skips the 7-day cooldown entirely (SPEC §13: "after grace, USDG
+bonds no longer count and become withdrawable immediately") but never skips the lock check.
+
+**Alternatives considered.** Waiving the lock for a de-accepted asset, reading SPEC §13 literally (rejected:
+that turns the migration into a collateral escape hatch — an MM with a live series could pull the collateral
+standing behind it). Keeping the old "no withdrawal while locked" rule unchanged (rejected: an MM that had
+already posted the new asset would have to skip an auction to migrate).
+
+**Consequences.** With a single asset the new rule is exactly the old one, so `BondManager.t.sol` is unchanged.
+`test_T13_migrationIsNotACollateralEscapeHatch` and `test_lockedMmMayPullTheLegItIsNotStandingOn` cover both
+sides.
+
+## D-083 · 2026-09-04 · Slashing is per leg, with no spillover, and proceeds go to the treasury
+
+**Decision.** `slashBondIn(holder, kind, asset, amount, evidenceURI)` names its asset; the one-argument
+`slashBond` is an alias for the current `bondAsset`. Slashed WRITE goes to `treasury`, not to the burn address.
+
+**Alternatives considered.** An implicit ordering that drains one leg then the other (rejected: the timelock
+proposal should say what it is slashing). Burning slashed WRITE (rejected: it destroys the resource that funds
+the shortfall path).
+
+**Consequences.** `test_slashBondIn_hasNoSpillover` pins the isolation between legs.
+
+## D-084 · 2026-09-04 · `writePool` is removed from FeeRouter, superseding D-016
+
+**Decision.** The WRITE-mode launch gate becomes `writeToken != address(0) && priceOracle != address(0)`.
+`FeeRouter` no longer stores a pool address.
+
+**Alternatives considered.** Keeping `writePool` as the D-016 flag and asserting it equals the oracle's pool
+(rejected: an address the contract never reads is dead state and a second, unverifiable place to point at a
+pool; the oracle already validates the pool thoroughly in `setPool`).
+
+**Consequences.** D-016's intent — WRITE mode unreachable until the timelock enables it post-launch — is
+preserved exactly; only the flag changes. `SPEC.md` §11 is amended, and
+`test/FeeRouter.t.sol:42` changes from asserting `writePool()` to asserting `writeToken()` and `priceOracle()`.
+This is the only compile-level change in the existing test suite.
+
+## D-085 · 2026-09-04 · The WRITE fee debit happens in `flush`, never in `collect`
+
+**Decision.** `FeeRouter.collect` is left byte-for-byte as it was — pure bookkeeping, no transfer. The entire
+WRITE path (oracle read, balance debit, burn, treasury transfer, USDG rebate) runs inside the permissionless
+`flush`. SPEC §11 already described it this way.
+
+**Alternatives considered.** Debiting at collect time inside a try/catch (rejected: EIP-150's 63/64 rule means
+a gas-bomb oracle can consume enough gas that `mintSeries` and the bond-unlock loop at
+`AuctionHouse.sol:384-390` run out, bricking a permissionless `clear()` without the try/catch ever seeing a
+revert).
+
+**Consequences.** `clear()` is un-brickable *by construction* rather than by exhaustive revert analysis.
+`test_T07_clearNeverRevertsBecauseOfTheWritePath` drives a clearing with the oracle dead, the curator balance
+empty and WRITE mode on, and it still succeeds.
+
+## D-086 · 2026-09-04 · The USDG rebate goes to the curator; no separate rebate recipient
+
+**Decision.** When the WRITE path succeeds, the USDG fee is transferred to `curatorOf[vault]`.
+
+**Alternatives considered.** A separate `feeRebateRecipient` with its own setter, as SPEC §11 hints (rejected:
+a second 48 h governance path for a rarely-used payout override, when re-pointing `curatorOf` achieves the same
+thing).
+
+**Consequences.** `SPEC.md` §11 is amended to name the curator directly.
+
+## D-087 · 2026-09-04 · The WRITE discount and burn share are global, not per vault
+
+**Decision.** `writeDiscountBps` (default 2000) and `writeBurnShareBps` (default 5000) are protocol-wide,
+bounded by 5000 and 10000 respectively.
+
+**Alternatives considered.** Per-vault values, matching `feeBps` (rejected: a per-vault 100 % discount is a
+silent fee waiver for one curator, decided by a parameter that reads like a discount rather than an exemption).
+
+**Consequences.** D-011's values are unchanged; only their scope is stated.
+
+## D-088 · 2026-09-04 · Both WRITE conversion legs round up
+
+**Decision.** `discounted6 = ceil(feeUSD6 × (1e4 − discountBps) / 1e4)` and
+`writeAmount = ceil(discounted6 × 1e20 / price8)`.
+
+**Alternatives considered.** Flooring either leg (rejected: a strictly positive, repeatable leak to the curator
+on every clearing — small per series, unbounded over a year of weekly auctions).
+
+**Consequences.** The curator overpays by at most one wei per clearing.
+`test_previewWriteFee_roundsUpInTheProtocolsFavour` pins the direction.
+
+## D-089 · 2026-09-04 · `WriteFeePaid` carries the price, `WriteModeFallback` carries a reason
+
+**Decision.** `WriteFeePaid(vault, curator, feeUSDG, writeAmount, burned, price8)` and
+`WriteModeFallback(vault, bytes32 reason)`. `withdrawWrite` checks `WriteNotLaunched` before the curator check.
+
+**Alternatives considered.** Keeping the original one-argument `WriteModeFallback(vault)` (rejected: "why did
+WRITE mode not fire" then needs off-chain state reconstruction; the reason code answers it from a log).
+Nothing is deployed, so changing the event topics costs nothing.
+
+**Consequences.** **Amends `SPEC.md` §16.1.** The check ordering keeps `test/FeeRouter.t.sol:167` passing
+byte-for-byte — without it the pre-launch revert would be `NotCurator` instead of `WriteNotLaunched`.
+
+## D-090 · 2026-09-04 · No vesting or distribution accounting reads `balanceOf`
+
+**Decision.** `Vesting.unallocated() = allocation − reallocated − totalAllocated` and
+`PointsDistributor.unreserved() = allocation − paidOut − sweptTotal − outstanding`. Both derive from an
+immutable, never from the token balance.
+
+**Alternatives considered.** Bounding allocations by `balanceOf(address(this))` (rejected: a donation would
+then expand what governance may allocate or reallocate, and a 1-wei donation at the wrong moment can brick an
+`==` funding assert).
+
+**Consequences.** `test_donationDoesNotExpandTheUnallocatedPool` and
+`test_donationDoesNotExpandTheUnreservedPool` state the property directly; `invariant_I24` proves the buckets
+partition the allocation exactly.
+
+## D-091 · 2026-09-04 · `revoke` moves no tokens, and `createSchedule` rejects an already-passed cliff
+
+**Decision.** `revoke` freezes `totalAmount` at the amount vested so far and returns the remainder to the
+unallocated pool; `vestedAmount` then reports that frozen figure forever. `createSchedule` reverts
+`InvalidSchedule` when `start + cliffDuration < block.timestamp`. The reallocation entry point is named
+`reallocateUnallocated`, not "sweep".
+
+**Alternatives considered.** Sending the unvested remainder straight to the treasury on revoke (rejected: a
+replacement hire cannot then be granted from it without a second proposal). Allowing a backdated cliff
+(rejected: one proposal could unlock a large grant instantly; backdating `start` to TGE stays legal, which is
+the legitimate use). Calling it `sweepUnallocated` (rejected: SPEC §15 forbids sweeps, so the word invites a
+false audit finding on a provably bounded function).
+
+**Consequences.** The already-vested-but-unreleased portion stays claimable after revocation, and
+`totalAllocated == Σ totalAmount` stays exact — `invariant_I23`.
+
+## D-092 · 2026-09-04 · Beneficiary rotation is two-step and self-initiated; the timelock cannot redirect
+
+**Decision.** `proposeBeneficiary` is callable only by the current beneficiary; `acceptBeneficiary` only by the
+proposed one. There is no governance path to change a beneficiary.
+
+**Alternatives considered.** A timelocked `setBeneficiary` for lost keys (rejected: it is a governance power to
+redirect a vested grant, which is what "non-revocable" is supposed to exclude).
+
+**Consequences.** Accepted residual: a genuinely lost key strands the grant. Recorded here so it is a decision
+rather than an oversight.
+
+## D-093 · 2026-09-04 · Points are distributed in rounds, with a round-scoped double-hashed leaf
+
+**Decision.** `setRound(roundId, root, amount, start, deadline)`, amendable only before `start`;
+`claim(roundId, index, account, amount, proof)` with a per-round bitmap; `sweep(roundId)` after the deadline.
+The leaf is `keccak256(bytes.concat(keccak256(abi.encode(roundId, index, account, amount))))`, verified with
+`MerkleProof.verifyCalldata`. Both claim and sweep are permissionless, and a claim always pays `account`.
+
+**Alternatives considered.** A single replaceable root (rejected: it cannot be replaced once claiming has
+started, and the 100 M bucket must serve both the airdrop and the MM/curator bond grants). A single-hashed leaf
+(rejected: an internal node could be presented as a leaf). Omitting `roundId` from the leaf (rejected: a proof
+from one round would replay into another).
+
+**Consequences.** This encoding is the integration contract with the off-chain `points/` generator, which does
+not exist yet and which **must** assert that its leaf amounts sum to the round's allocation; on chain,
+`RoundExhausted` confines an over-issuing root to its own allocation.
+
+## D-094 · 2026-09-04 · `LiquidityEscrow` refuses a raw AMM pool as its destination
+
+**Decision.** `setPool` probes the candidate for `token0()`/`token1()` and reverts `PoolIsRawAmm` if either is
+WRITE. The pool is re-pointable until the first `fund`, then frozen. `renounceOwnership` is disabled. There is
+no rescue path and no second destination.
+
+**Alternatives considered.** Requiring the destination to implement a deposit callback interface (rejected: it
+imposes an interface on a venue the SPEC does not yet describe). Relying on `onlyOwner` alone (rejected: the
+timelock is the party that would make the typo, and a bare `transfer` of 250 M WRITE into a v3 pool is a
+donation the next swap takes — 25 % of supply gone in one block).
+
+**Consequences.** The escrow holds WRITE only; the paired USDG for the launch pool comes from the treasury.
+The launch venue itself is still an open item in `docs/TOKENOMICS.md`.
+
+## D-095 · 2026-09-04 · One `TokenBaseTest` on top of `SettlementBaseTest`; the real module is named `sm`
+
+**Decision.** Everything needing chain state extends `TokenBaseTest is SettlementBaseTest`; the pure-token
+suites use a bare `TokenUnitBaseTest is Test`. Both deploy through `script/TokenDeployLib.sol`. The real
+safety module is `sm`, because `Base.t.sol` already declares `MockSafetyModule safetyModule`.
+
+**Alternatives considered.** A mixin fixture (rejected: two `setUp()` bases). Extending `SettlementBaseTest` in
+place (rejected: it would change the state every existing settlement test runs against).
+
+**Consequences.** The inherited `MockSafetyModule` stays constructed and unused, so `CapControllerTest` keeps
+its isolation and `Base.t.sol` / `AuctionBase.t.sol` are untouched.
+
+## D-096 · 2026-09-04 · Pool ticks are derived by binary search, and price expectations come from the live oracle
+
+**Decision.** `TokenBaseTest._tickForWritePrice` binary-searches the production math for the tick nearest a
+target price; every price assertion uses `assertApproxEqRel` and every downstream expectation (`valueUSD`,
+`vaultCapUSD`, `maxDeposit`) is derived from the live oracle price rather than the nominal $0.10.
+
+**Alternatives considered.** A hardcoded tick constant, as `SettlementBaseTest` uses for the stock pool
+(rejected: hand-computed it is wrong by tens of ticks, and even the exactly correct tick prices WRITE at
+$0.100000280 rather than $0.10 — a test asserting the nominal figure to a tight tolerance fails for a reason
+that has nothing to do with the code under test). `vm.etch` to force an address ordering (rejected: it would
+not copy WRITE's minted balances).
+
+**Consequences.** Both pool token orderings are covered by `test_writePrice_bothTokenOrderings`, and the
+fixture reads `pool.token0()` rather than comparing addresses, so no test depends on deploy-nonce ordering.
+
+## D-097 · 2026-09-04 · A reward claim is capped at the module's surplus above principal
+
+**Decision.** `SafetyModule.claimRewards` pays `min(credited, rewardSurplus())`, where
+`rewardSurplus() = balanceOf(this) − totalStaked − unallocatedRewards`, and decrements
+`totalUnclaimedRewards` saturatingly. Any shortfall stays credited to the account.
+
+**Why.** Found by the CI-profile invariant run (256 × 64), not by the default profile. Rewards are credited
+from a floored cumulative index: `_harvest` credits `floor(s × A₂ / P) − floor(s × A₁ / P)`, and that can
+exceed `floor(s × (A₂ − A₁) / P)` by one wei. `_accrue` meanwhile increments `totalUnclaimedRewards` by the
+exact amount pulled. The sum of credits therefore drifts above the counter by roughly a wei per harvest, and
+the *last* account to claim hit `totalUnclaimedRewards -= amount` on an underflow — their rewards became
+permanently unreachable. Reproduced deterministically from the shrunk sequence: a stake, an accrual, a slash,
+a second stake and two claims left `sum(pending) = totalUnclaimedRewards + 1`.
+
+**Alternatives considered.** Keeping `_rewardDebt` unfloored as `shares × A` so the credit is a single floor
+(rejected: with `ACC_PRECISION = 1e36` and post-slash share inflation, `shares × A` reaches ~1e81 and
+overflows `uint256`). Lowering `ACC_PRECISION` (rejected: it trades a liveness bug for a precision loss on
+small stakes, and the vault's 1e36 is the house constant). Making only the subtraction saturating (rejected:
+it stops the revert but leaves the real question — whether a claim can reach staked principal — unanswered).
+
+**Consequences.** "A reward claim never touches staked principal" becomes structural rather than a
+consequence of the index being exact. The `safeRewardTransfer` shape is the standard fix for this class of
+bug in index-based reward contracts. Invariant I-18 is restated against principal plus parked emissions
+(which is exactly true) rather than against `totalUnclaimedRewards` (which drifts), and I-28 bounds credits
+by the surplus plus the dust. Regression tests:
+`test_claimRewards_dustDriftNeverBricksTheLastClaimant`, `test_rewardSurplusBoundsEveryClaim`.
