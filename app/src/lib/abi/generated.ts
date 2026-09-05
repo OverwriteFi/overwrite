@@ -3,7 +3,7 @@
 
 /* eslint-disable */
 // prettier-ignore
-/** `CoveredCallVault.sol/CoveredCallVault.json` — 110 fragments. */
+/** `CoveredCallVault.sol/CoveredCallVault.json` — 111 fragments. */
 export const vaultAbi = [
   {
     "type": "error",
@@ -341,6 +341,17 @@ export const vaultAbi = [
         "name": "account",
         "type": "address",
         "internalType": "address"
+      }
+    ]
+  },
+  {
+    "type": "error",
+    "name": "RedeemQueueNotDrained",
+    "inputs": [
+      {
+        "name": "pending",
+        "type": "uint256",
+        "internalType": "uint256"
       }
     ]
   },
@@ -1740,7 +1751,7 @@ export const vaultAbi = [
   }
 ] as const;
 
-/** `AuctionHouse.sol/AuctionHouse.json` — 64 fragments. */
+/** `AuctionHouse.sol/AuctionHouse.json` — 65 fragments. */
 export const auctionHouseAbi = [
   {
     "type": "error",
@@ -1943,6 +1954,11 @@ export const auctionHouseAbi = [
         "internalType": "address"
       }
     ]
+  },
+  {
+    "type": "error",
+    "name": "PriceSourceFrozen",
+    "inputs": []
   },
   {
     "type": "error",
@@ -2936,8 +2952,19 @@ export const optionTokenAbi = [
   }
 ] as const;
 
-/** `CapController.sol/CapController.json` — 17 fragments. */
+/** `CapController.sol/CapController.json` — 19 fragments. */
 export const capControllerAbi = [
+  {
+    "type": "error",
+    "name": "NotAContract",
+    "inputs": [
+      {
+        "name": "target",
+        "type": "address",
+        "internalType": "address"
+      }
+    ]
+  },
   {
     "type": "error",
     "name": "OutOfBounds",
@@ -2964,6 +2991,11 @@ export const capControllerAbi = [
         "internalType": "address"
       }
     ]
+  },
+  {
+    "type": "error",
+    "name": "PriceSourceFrozen",
+    "inputs": []
   },
   {
     "type": "error",
