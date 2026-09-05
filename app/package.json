@@ -6,15 +6,18 @@
     "dev": "next dev",
     "build": "next build",
     "start": "next start",
-    "lint": "eslint"
+    "lint": "eslint",
+    "gen:abi": "node scripts/gen-abi.mjs"
   },
   "dependencies": {
     "@tanstack/react-query": "^5.102.8",
     "next": "16.3.4",
     "react": "19.2.8",
     "react-dom": "19.2.8",
+    "server-only": "^0.0.1",
     "viem": "^2.56.3",
-    "wagmi": "^3.7.7"
+    "wagmi": "^3.7.7",
+    "zod": "^3.25.76"
   },
   "devDependencies": {
     "@tailwindcss/postcss": "^4",
