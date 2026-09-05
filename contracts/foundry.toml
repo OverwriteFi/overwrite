@@ -43,6 +43,25 @@ runs = 256
 depth = 64
 fail_on_revert = true
 
+# Long invariant campaign (docs/AUDIT-PREP.md). Sized for ~24 h of wall clock on one 8-core box across the seven
+# invariant suites; stop it early with Ctrl-C and forge still reports every run it completed. Separate `out` /
+# `cache` so it can run beside a normal `forge test` without fighting over the build cache.
+#   FOUNDRY_PROFILE=deep forge test --match-path "test/invariants/*" -vv
+[profile.deep]
+out = "out-deep"
+cache_path = "cache-deep"
+verbosity = 2
+
+[profile.deep.fuzz]
+runs = 50000
+
+[profile.deep.invariant]
+runs = 6000
+depth = 128
+fail_on_revert = true
+call_override = false
+shrink_run_limit = 5000
+
 [lint]
 # style-only notes we deliberately do not follow (SPEC naming: capUSD, valueUSD, uiMultiplier; immutables in camelCase)
 exclude_lints = ["mixed-case-variable", "mixed-case-function", "screaming-snake-case-immutable", "unwrapped-modifier-logic"]

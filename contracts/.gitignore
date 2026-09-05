@@ -5,3 +5,7 @@ broadcast/
 .env.*
 !.env.example
 docs/
+
+# per-profile build dirs (deep campaign, audit scratch)
+out-*/
+cache-*/
