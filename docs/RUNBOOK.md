@@ -75,6 +75,11 @@ Nothing here sends a transaction. Do all of it before touching the Ledger.
 
 ## 2. Stage 1 — the deployer signs `new`, and nothing else
 
+> Audit 2026-09-05 (D-113): `deploy.sh` refuses anything but `--ledger` on 4663, `Config.validate` refuses a mainnet
+> config with `timelockMinDelay < 172800`, `deployerIsAdmin = true`, fewer than two guardians or a key used twice, and
+> `run()` must **not** be re-run between stage 1 and batch A on a real-delay chain — it would deploy a second system and
+> overwrite `deployments/4663.json` (re-print batch A from the address book instead).
+
 ### 2.1 Dry run
 
 ```bash
@@ -130,7 +135,7 @@ auction can open. Nothing is at risk while you sit on this state.
 
 ## 3. Batch A — the first timelock signature
 
-The script printed, for each of the **17 calls** (one vault, two guardians, token layer included), the target
+The script printed, for each of the **19 calls** (one vault, two guardians, token layer included), the target
 and the calldata; then the whole `scheduleBatch` calldata and the whole `executeBatch` calldata.
 
 The batch, in order — this ordering is load-bearing, and every constraint is a setter assert, not a preference:
@@ -148,7 +153,9 @@ The batch, in order — this ordering is load-bearing, and every constraint is a
 | 10 | `capController.setCapUSD` | without it the vault takes no deposits |
 | 11 | `auctionHouse.setPriceSource` | swaps the placeholder for the oracle |
 | 12 | `capController.setPriceSource` | same |
-| 13–17 | `setWriteToken` ×5 | on the five WRITE holders |
+| 13 | `auctionHouse.freezePriceSource` | one-way (audit G-1, D-113): `S_ref` can never be re-pointed again; refuses a placeholder |
+| 14 | `capController.freezePriceSource` | same for `S_cap` |
+| 15–19 | `setWriteToken` ×5 | on the five WRITE holders |
 
 ### 3.1 Schedule
 
