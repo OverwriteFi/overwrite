@@ -36,6 +36,7 @@ const SLICES = {
       "lastWeekdayExpiry",
       "isVault",
       "openTolerance",
+      "clearGrace",
       "minBidQty",
       "maxBidsPerBidder",
       "minStrikeDistanceBps",

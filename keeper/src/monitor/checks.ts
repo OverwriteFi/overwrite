@@ -7,7 +7,8 @@ import {
   type Hex,
   type PublicClient,
 } from "viem";
-import { aggregatorAbi, settlementOracleAbi } from "../abi/index.js";
+import { aggregatorAbi, auctionHouseAbi, settlementOracleAbi } from "../abi/index.js";
+import { clearSecondsLeft, clearWindowSeverity } from "../jobs/clearWindow.js";
 import { multicall } from "../chain/multicall.js";
 import type { ResolvedConfig } from "../config.js";
 import { coverage } from "../oracle/observations.js";
@@ -61,12 +62,22 @@ export interface CheckContext {
   knownImplementations: Record<string, string>;
 }
 
+/** `AuctionHouse.clearGrace`, read once per check run (a timelocked parameter, so never cached across runs). */
+async function readClearGrace(client: PublicClient, auctionHouse: Address): Promise<bigint> {
+  return client.readContract({
+    address: auctionHouse,
+    abi: auctionHouseAbi,
+    functionName: "clearGrace",
+  });
+}
+
 export async function runChecks(
   ctx: CheckContext,
 ): Promise<{ checks: Check[]; implementations: Record<string, string> }> {
   const { cfg, client, now, ticks } = ctx;
   const m = cfg.file.monitor;
   const checks: Check[] = [];
+  let clearGrace: bigint | undefined;
 
   /* ── keeper wallet ── */
   const balance = await client.getBalance({ address: cfg.keeperAddress });
@@ -223,6 +234,27 @@ export async function runChecks(
           ? `${v} holds no assets; auctions cannot open until somebody deposits`
           : `${v} holds ${s.totalAssets} raw units`,
     });
+
+    // The clearing window (REHEARSAL-1 S-1, D-113 F-2): a clear later than `auctionClose + clearGrace`
+    // takes the skip path and the week's premium is gone, so the last 15 minutes are an alert.
+    if (s.state === "AUCTION" && s.auction) {
+      clearGrace ??= await readClearGrace(client, cfg.deployment.core.auctionHouse);
+      const sev = clearWindowSeverity(now, s.auction.auctionClose, clearGrace);
+      const left = clearSecondsLeft(now, s.auction.auctionClose, clearGrace);
+      checks.push({
+        id: "clear.window",
+        vault: v,
+        severity: sev,
+        summary:
+          sev === "crit"
+            ? `${v} auction ${s.currentSeriesId} closed at ${s.auction.auctionClose} and the ${clearGrace}s clearing window has passed: the next clear SKIPS the series (${t.outcome}: ${t.detail ?? ""})`
+            : sev === "warn"
+              ? `${v} auction ${s.currentSeriesId} must be cleared within ${left}s or it skips (${t.outcome}: ${t.detail ?? ""})`
+              : `${v} auction ${s.currentSeriesId}: ${left}s left in the clearing window`,
+        measured: left.toString(),
+        threshold: clearGrace.toString(),
+      });
+    }
 
     // Pending settlement, and the halted clock.
     const series = s.series;

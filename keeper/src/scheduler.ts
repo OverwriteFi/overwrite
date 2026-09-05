@@ -4,6 +4,7 @@ import { chainNow } from "./chain/clients.js";
 import type { Sender } from "./chain/tx.js";
 import type { ResolvedConfig, VaultConfig } from "./config.js";
 import { clearAuction, flushFees, processQueues, releaseLocks } from "./jobs/clear.js";
+import { retryOpenKind } from "./jobs/clearWindow.js";
 import { openAuction, planOpen } from "./jobs/openAuction.js";
 import { resolveIfPossible, settleSeries } from "./jobs/settle.js";
 import type { Logger } from "./logger.js";
@@ -152,6 +153,23 @@ export class Scheduler {
               ? "skipped"
               : "cleared";
         this.record({ at, vault: snapshot.symbol, action: "clear", outcome });
+        if (willSkip && result.status !== "failed" && !settleOnly) {
+          // REHEARSAL-1 S-1: a SKIPPED series hands the vault back IDLE. `canOpen` (D-046) accepts another
+          // open anywhere inside the same window, so re-open now instead of losing the week to one skip.
+          const kind = retryOpenKind(now, await this.tolerance());
+          if (kind !== null) {
+            const fresh = await readVault(
+              this.client,
+              deployment,
+              snapshot.addresses,
+              snapshot.symbol,
+            );
+            if (fresh.state === "IDLE") {
+              const retry = await this.tryOpen(fresh, vaultCfg, kind, now, at, "retry after skip");
+              return done("clear", `${outcome}; re-open ${retry.outcome}`, retry.detail);
+            }
+          }
+        }
         return done("clear", outcome);
       }
 
@@ -208,52 +226,66 @@ export class Scheduler {
         if (settleOnly) return done("open", "skipped: settle-only instance");
         const kind = await this.openKindDue(snapshot, now);
         if (kind === null) return done("open", "waiting", "outside every opening window");
-
-        const plan = await planOpen({
-          client: this.client,
-          auctionHouse: deployment.core.auctionHouse,
-          snapshot,
-          vaultCfg,
-          file,
-          kind,
-          now,
-          state: this.state,
-          log: this.log,
-        });
-        if (!plan.ok) {
-          // "NO_ASSETS" on a fresh vault is the expected state, not an incident.
-          const level = plan.reason === "NO_ASSETS" ? "info" : "warn";
-          this.log[level](
-            { vault: snapshot.symbol, kind: kindName(kind), reason: plan.reason },
-            "cannot open this cycle",
-          );
-          return done("open", "blocked", plan.reason);
-        }
-        const result = await openAuction({
-          sender: this.sender,
-          auctionHouse: deployment.core.auctionHouse,
-          snapshot,
-          plan: plan.plan,
-          deploymentVaults: deployment.vaults.map((v) => v.vault),
-          log: this.log,
-        });
-        const outcome = result.status === "failed" ? `failed: ${result.error.text}` : result.status;
-        this.record({
-          at,
-          vault: snapshot.symbol,
-          action: `openAuction ${kindName(kind)}`,
-          outcome,
-          detail:
-            `strike ${plan.plan.strike} reserve ${plan.plan.reserve.reservePrice} ` +
-            `(${plan.plan.reserve.decidedBy}; sigma ${plan.plan.vol.sigma.toFixed(4)} ${plan.plan.vol.source}, ` +
-            `model ${plan.plan.reserve.modelPrice} vs floor ${plan.plan.reserve.lo})`,
-        });
-        return done("open", outcome);
+        const r = await this.tryOpen(snapshot, vaultCfg, kind, now, at);
+        return done("open", r.outcome, r.detail);
       }
 
       default:
         return done("none", "idle");
     }
+  }
+
+  /** Plan and send one `openAuction`; the IDLE step and the post-skip retry share it. */
+  private async tryOpen(
+    snapshot: VaultSnapshot,
+    vaultCfg: VaultConfig,
+    kind: SeriesKind,
+    now: bigint,
+    at: string,
+    tag?: string,
+  ): Promise<{ outcome: string; detail?: string }> {
+    const { deployment, file } = this.cfg;
+    const plan = await planOpen({
+      client: this.client,
+      auctionHouse: deployment.core.auctionHouse,
+      snapshot,
+      vaultCfg,
+      file,
+      kind,
+      now,
+      state: this.state,
+      log: this.log,
+    });
+    if (!plan.ok) {
+      // "NO_ASSETS" on a fresh vault is the expected state, not an incident.
+      const level = plan.reason === "NO_ASSETS" ? "info" : "warn";
+      this.log[level](
+        { vault: snapshot.symbol, kind: kindName(kind), reason: plan.reason, tag },
+        "cannot open this cycle",
+      );
+      return { outcome: "blocked", detail: plan.reason };
+    }
+    const result = await openAuction({
+      sender: this.sender,
+      auctionHouse: deployment.core.auctionHouse,
+      snapshot,
+      plan: plan.plan,
+      deploymentVaults: deployment.vaults.map((v) => v.vault),
+      log: this.log,
+    });
+    const outcome = result.status === "failed" ? `failed: ${result.error.text}` : result.status;
+    const detail =
+      `strike ${plan.plan.strike} reserve ${plan.plan.reserve.reservePrice} ` +
+      `(${plan.plan.reserve.decidedBy}; sigma ${plan.plan.vol.sigma.toFixed(4)} ${plan.plan.vol.source}, ` +
+      `model ${plan.plan.reserve.modelPrice} vs floor ${plan.plan.reserve.lo})`;
+    this.record({
+      at,
+      vault: snapshot.symbol,
+      action: `openAuction ${kindName(kind)}${tag ? ` (${tag})` : ""}`,
+      outcome,
+      detail,
+    });
+    return { outcome, detail };
   }
 
   /** Which opening window, if any, `now` sits in. Mirrors `AuctionHouse.canOpen`'s two branches. */
