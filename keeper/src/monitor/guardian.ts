@@ -71,7 +71,9 @@ export class GuardianModule {
    * is somebody else's problem.
    */
   async onChecks(checks: readonly Check[]): Promise<void> {
-    const trigger = checks.find((c) => c.id === "implementation.watch" && c.severity === "crit");
+    const trigger = checks.find(
+      (c) => c.id.startsWith("implementation.watch") && c.severity === "crit",
+    );
     if (!trigger || this.tripped) return;
     this.tripped = true;
 

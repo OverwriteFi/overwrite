@@ -280,37 +280,68 @@ export async function runChecks(
           : `${v}: ${drift.join("; ")}`,
     });
 
-    // D-020: the stock-token beacon and the USDG implementation.
-    for (const [label, address] of [
-      [`${v}.stock`, s.addresses.stock],
-      ["usdg", cfg.deployment.external.usdg],
-    ] as const) {
-      const impl = await readImplementation(client, address);
-      if (impl === null) {
-        checks.push({
-          id: "implementation.watch",
-          vault: v,
-          severity: "na",
-          summary: `${label} at ${address} is not an ERC-1967 proxy or beacon — nothing to watch (every 46630 token is a plain mock)`,
-        });
-        continue;
-      }
-      const previous = ctx.knownImplementations[label];
-      implementations[label] = impl;
-      checks.push({
-        id: "implementation.watch",
+    // D-020: this vault's stock-token beacon. USDG is shared, so it is checked once, below.
+    checks.push(
+      await implementationCheck({
+        client,
+        id: "implementation.watch.stock",
         vault: v,
-        severity: previous && previous !== impl ? "crit" : "ok",
-        summary:
-          previous && previous !== impl
-            ? `${label} implementation changed from ${previous} to ${impl} — D-020 says pause deposits and new auctions and page the founder before anything else happens`
-            : `${label} implementation ${impl}`,
-        measured: impl,
-      });
-    }
+        label: `${v}.stock`,
+        address: s.addresses.stock,
+        known: ctx.knownImplementations,
+        into: implementations,
+      }),
+    );
   }
 
+  // D-020: the USDG implementation. One token shared by every vault, so one check — putting it inside
+  // the loop produced N identical entries that collided on the alerter's `${id}:${vault}` dedupe key,
+  // so two different subjects fought over one alert slot.
+  checks.push(
+    await implementationCheck({
+      client,
+      id: "implementation.watch.usdg",
+      label: "usdg",
+      address: cfg.deployment.external.usdg,
+      known: ctx.knownImplementations,
+      into: implementations,
+    }),
+  );
+
   return { checks, implementations };
+}
+
+async function implementationCheck(args: {
+  client: PublicClient;
+  id: string;
+  vault?: string;
+  label: string;
+  address: Address;
+  known: Record<string, string>;
+  into: Record<string, string>;
+}): Promise<Check> {
+  const { client, id, vault, label, address, known, into } = args;
+  const impl = await readImplementation(client, address);
+  if (impl === null) {
+    return {
+      id,
+      ...(vault ? { vault } : {}),
+      severity: "na",
+      summary: `${label} at ${address} is not an ERC-1967 proxy or beacon — nothing to watch (every 46630 token is a plain mock)`,
+    };
+  }
+  const previous = known[label];
+  into[label] = impl;
+  return {
+    id,
+    ...(vault ? { vault } : {}),
+    severity: previous && previous !== impl ? "crit" : "ok",
+    summary:
+      previous && previous !== impl
+        ? `${label} implementation changed from ${previous} to ${impl} — D-020 says pause deposits and new auctions and page the founder before anything else happens`
+        : `${label} implementation ${impl}`,
+    measured: impl,
+  };
 }
 
 async function readFeed(

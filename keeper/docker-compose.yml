@@ -1,8 +1,20 @@
 # Run the keeper under Docker.
 #
-#   cd keeper && docker compose up -d --build
+#   cd keeper
+#   docker compose --env-file ../.env up -d --build
 #   docker compose logs -f
 #   curl -s http://127.0.0.1:8787/status | jq .overall
+#
+# To validate this file without rendering your keys, add --no-interpolate:
+#   docker compose --env-file ../.env config --no-interpolate
+#
+# Why the explicit `environment:` list instead of `env_file: ../.env`. The repo root `.env` is a
+# monorepo grab-bag: it also holds DEPLOYER_PRIVATE_KEY, the points DB path and the app's public vars.
+# `env_file` would inject *all* of it into this container, handing the keeper the deploy key it must
+# never have — and `docker compose config` renders an env_file inline, so the deploy key ends up on
+# anyone's terminal who validates the stack. `--env-file` uses that file for interpolation only, and
+# the list below is the allowlist of what actually reaches the process. It mirrors the one in
+# src/chain/tx.ts: the keeper gets exactly what it needs and nothing else.
 #
 # Do NOT run this alongside the systemd unit. They are two ways to run the same thing, and two keepers
 # sharing one key interleave nonces on every permissionless call. The keeper refuses to start while
@@ -18,16 +30,34 @@ services:
     image: overwrite/keeper:latest
     container_name: overwrite-keeper
     restart: unless-stopped
-    env_file:
-      - ../.env
     environment:
+      # --- identity and chain ---
+      CHAIN_ID: ${CHAIN_ID:-46630}
+      ROBINHOOD_RPC_URL: ${ROBINHOOD_RPC_URL:-}
+      ROBINHOOD_TESTNET_RPC_URL: ${ROBINHOOD_TESTNET_RPC_URL:-}
+      KEEPER_RPC_URL: ${KEEPER_RPC_URL:-}
+      # Passed through empty rather than guarded with `:?`. A compose-level guard makes `config` fail
+      # on any checkout where the key is not filled in yet, and it duplicates a check src/config.ts
+      # already makes with a better message ("must be 0x + 64 hex characters"). One validator.
+      KEEPER_PRIVATE_KEY: ${KEEPER_PRIVATE_KEY:-}
+      # A distinct key holding GUARDIAN_ROLE. Only loaded when GUARDIAN_AUTOPAUSE is on.
+      GUARDIAN_PRIVATE_KEY: ${GUARDIAN_PRIVATE_KEY:-}
+      GUARDIAN_AUTOPAUSE: ${GUARDIAN_AUTOPAUSE:-false}
+
+      # --- behaviour ---
+      KEEPER_CONFIG: ${KEEPER_CONFIG:-}
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+      DRY_RUN: ${DRY_RUN:-false}
+      TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN:-}
+      TELEGRAM_CHAT_ID: ${TELEGRAM_CHAT_ID:-}
+
+      # --- fixed by the image layout, not by the host's .env ---
+      NODE_ENV: production
+      STATE_DIR: /app/state
       # Bind 0.0.0.0 *inside* the container. Binding 127.0.0.1 there would make the published port
       # unreachable: Docker's proxy connects to the container's own IP, not to its loopback.
       STATUS_HOST: 0.0.0.0
       STATUS_PORT: "8787"
-      STATE_DIR: /app/state
-      DEPLOYMENT_PATH: /app/deployments/46630.json
-      NODE_ENV: production
     ports:
       # Host loopback only. Put a reverse proxy in front if the frontend needs /status.
       - "127.0.0.1:8787:8787"

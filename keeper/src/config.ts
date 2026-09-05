@@ -1,46 +1,80 @@
 import { readFileSync } from "node:fs";
-import { isAbsolute, resolve } from "node:path";
+import { isAbsolute, join, resolve } from "node:path";
 import { z } from "zod";
 import { getAddress } from "viem";
 import { formatIssues, loadDeployment, type Deployment } from "./deployment.js";
 
 /* ────────────────────────────── environment ────────────────────────────── */
 
+/**
+ * `.env` files are full of `VAR=` placeholders, and the shipped one carries the testnet RPC as a bare
+ * host. Both are normal, and both used to be startup failures here: zod treats "" as a present-but-
+ * invalid value rather than an absent one, and `z.string().url()` rejects a host with no scheme. So
+ * every optional field goes through `blank`, and the RPC fields also get a scheme if they lack one.
+ */
+const blank = (v: unknown): unknown => {
+  if (typeof v !== "string") return v;
+  const t = v.trim();
+  return t === "" ? undefined : t;
+};
+
 const hexKey = z.string().regex(/^0x[0-9a-fA-F]{64}$/, "must be 0x + 64 hex characters");
+
 const bool = z
-  .enum(["true", "false", "1", "0", "yes", "no"])
+  .preprocess(blank, z.enum(["true", "false", "1", "0", "yes", "no"]).optional())
   .transform((v) => v === "true" || v === "1" || v === "yes");
+
+const rpcUrl = z.preprocess((v) => {
+  const s = blank(v);
+  if (typeof s !== "string") return s;
+  return /^[a-z][a-z0-9+.-]*:\/\//i.test(s) ? s : `https://${s}`;
+}, z.string().url().optional());
+
+const optionalText = z.preprocess(blank, z.string().min(1).optional());
 
 const envSchema = z.object({
   // 4663 = Robinhood Chain mainnet, 46630 = testnet
-  CHAIN_ID: z.coerce.number().pipe(z.union([z.literal(4663), z.literal(46630)])),
-  ROBINHOOD_RPC_URL: z.string().url().optional(),
-  ROBINHOOD_TESTNET_RPC_URL: z.string().url().optional(),
+  CHAIN_ID: z.preprocess(
+    blank,
+    z.coerce.number().pipe(z.union([z.literal(4663), z.literal(46630)])),
+  ),
+  ROBINHOOD_RPC_URL: rpcUrl,
+  ROBINHOOD_TESTNET_RPC_URL: rpcUrl,
   /** Overrides both of the above. The fork harness points this at anvil. */
-  KEEPER_RPC_URL: z.string().url().optional(),
+  KEEPER_RPC_URL: rpcUrl,
 
   /** Holds KEEPER_ROLE. Never logged; see logger.ts redaction. */
-  KEEPER_PRIVATE_KEY: hexKey,
+  KEEPER_PRIVATE_KEY: z.preprocess(blank, hexKey),
   /** A *different* key holding GUARDIAN_ROLE. Only loaded when GUARDIAN_AUTOPAUSE is on. */
-  GUARDIAN_PRIVATE_KEY: hexKey.optional(),
-  GUARDIAN_AUTOPAUSE: bool.default("false"),
+  GUARDIAN_PRIVATE_KEY: z.preprocess(blank, hexKey.optional()),
+  GUARDIAN_AUTOPAUSE: bool,
 
-  KEEPER_CONFIG: z.string().optional(),
-  DEPLOYMENT_PATH: z.string().optional(),
+  KEEPER_CONFIG: optionalText,
+  /** Full path to the deploy's address book. Wins over DEPLOYMENT_DIR and the config's own path. */
+  DEPLOYMENT_PATH: optionalText,
+  /**
+   * Directory holding `<chainId>.json`. The container image sets this to /app/deployments so it runs
+   * standalone: the checked-in config's `deploymentPath` is `../contracts/deployments/...`, which is
+   * correct from a source tree and resolves outside the image from /app.
+   */
+  DEPLOYMENT_DIR: optionalText,
 
-  LOG_LEVEL: z.enum(["trace", "debug", "info", "warn", "error", "fatal"]).default("info"),
-  DRY_RUN: bool.default("false"),
+  LOG_LEVEL: z.preprocess(
+    blank,
+    z.enum(["trace", "debug", "info", "warn", "error", "fatal"]).default("info"),
+  ),
+  DRY_RUN: bool,
 
-  STATE_DIR: z.string().default("./state"),
-  STATUS_FILE: z.string().optional(),
-  STATUS_HOST: z.string().default("127.0.0.1"),
-  STATUS_PORT: z.coerce.number().int().min(0).max(65535).default(8787),
+  STATE_DIR: z.preprocess(blank, z.string().default("./state")),
+  STATUS_FILE: optionalText,
+  STATUS_HOST: z.preprocess(blank, z.string().default("127.0.0.1")),
+  STATUS_PORT: z.preprocess(blank, z.coerce.number().int().min(0).max(65535).default(8787)),
 
-  TELEGRAM_BOT_TOKEN: z.string().min(1).optional(),
-  TELEGRAM_CHAT_ID: z.string().min(1).optional(),
+  TELEGRAM_BOT_TOKEN: optionalText,
+  TELEGRAM_CHAT_ID: optionalText,
 
   /** Legacy scaffold field; the scheduler polls instead of firing on a cron. Ignored, kept for .env compat. */
-  KEEPER_CRON: z.string().optional(),
+  KEEPER_CRON: optionalText,
 });
 
 export type Env = z.infer<typeof envSchema>;
@@ -189,6 +223,16 @@ export interface ResolvedConfig {
   stateDir: string;
 }
 
+/**
+ * Where to find the address book, most specific first: an explicit path, then a directory holding
+ * `<chainId>.json` (what the container image sets), then whatever the checked-in config says.
+ */
+export function deploymentPathFor(env: Env, file: KeeperFileConfig): string {
+  if (env.DEPLOYMENT_PATH) return env.DEPLOYMENT_PATH;
+  if (env.DEPLOYMENT_DIR) return join(env.DEPLOYMENT_DIR, `${env.CHAIN_ID}.json`);
+  return file.deploymentPath;
+}
+
 export function loadFileConfig(
   path: string,
   expectedChainId: number,
@@ -223,7 +267,7 @@ export function loadConfig(
 ): Omit<ResolvedConfig, "env" | "keeperAddress"> & { env: Env; keeperAddress: `0x${string}` } {
   const configPath = env.KEEPER_CONFIG ?? `./config/keeper.${env.CHAIN_ID}.json`;
   const file = loadFileConfig(configPath, env.CHAIN_ID, cwd);
-  const deployment = loadDeployment(env.DEPLOYMENT_PATH ?? file.deploymentPath, env.CHAIN_ID, cwd);
+  const deployment = loadDeployment(deploymentPathFor(env, file), env.CHAIN_ID, cwd);
 
   const unknown = Object.keys(file.vaults).filter(
     (s) => !deployment.vaults.some((v) => v.symbol === s),

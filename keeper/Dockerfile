@@ -54,7 +54,8 @@ VOLUME ["/app/state"]
 
 ENV STATE_DIR=/app/state \
     STATUS_HOST=0.0.0.0 \
-    STATUS_PORT=8787
+    STATUS_PORT=8787 \
+    DEPLOYMENT_DIR=/app/deployments
 EXPOSE 8787
 
 # `/healthz` is 200 while the tick loop is running and recent. It deliberately does NOT go red on a

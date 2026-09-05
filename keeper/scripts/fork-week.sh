@@ -25,6 +25,7 @@ RPC="${ROBINHOOD_TESTNET_RPC_URL:-https://rpc.testnet.chain.robinhood.com}"
 PORT="${ANVIL_PORT:-8545}"
 export ANVIL_URL="http://127.0.0.1:${PORT}"
 LOG="${WEEK_LOG:-state/week.log}"
+ANVIL_LOG="${ANVIL_LOG:-state/anvil.log}"
 
 command -v anvil >/dev/null || { echo "anvil not on PATH (looked in $FOUNDRY_BIN)"; exit 1; }
 mkdir -p state
@@ -36,7 +37,10 @@ FORK_ARGS=(--fork-url "$RPC")
 [ -n "${FORK_BLOCK:-}" ] && FORK_ARGS+=(--fork-block-number "$FORK_BLOCK")
 
 echo "forking $RPC${FORK_BLOCK:+ at block $FORK_BLOCK} ..."
-anvil "${FORK_ARGS[@]}" --port "$PORT" --host 127.0.0.1 --silent &
+# Not --silent. When a transaction mysteriously never mines, the cause is almost always an upstream
+# fetch that anvil could not serve (a pruned fork block, a rate limit), and anvil says so in its log —
+# but only if you kept it. Without this you wait out a 180 s receipt timeout with no explanation.
+anvil "${FORK_ARGS[@]}" --port "$PORT" --host 127.0.0.1 > "$ANVIL_LOG" 2>&1 &
 ANVIL_PID=$!
 
 for _ in $(seq 1 60); do
@@ -48,6 +52,14 @@ done
 echo "warming the fork cache before the upstream node prunes the fork block ..."
 node --import tsx test/week/prefetch.ts
 
+set +e
 node --import tsx test/week/simulate-week.ts 2>&1 | tee "$LOG"
+status=${PIPESTATUS[0]}
+set -e
 echo
 echo "log written to $(pwd)/$LOG"
+if [ "$status" -ne 0 ]; then
+  echo "run failed (exit $status). Last anvil errors, if any:"
+  grep -iE "error|warn|failed|not found|rate" "$ANVIL_LOG" | tail -15 || echo "  (none in $ANVIL_LOG)"
+fi
+exit "$status"

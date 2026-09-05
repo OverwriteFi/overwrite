@@ -411,9 +411,19 @@ turning it loose.
 Then either Docker or systemd, **not both** — two keepers sharing one key interleave nonces:
 
 ```bash
-docker compose up -d --build          # from keeper/
+docker compose --env-file ../.env up -d --build    # from keeper/
 sudo systemctl enable --now overwrite-keeper
 curl -s http://127.0.0.1:8787/status | jq '.overall, .vaults[].state'
+```
+
+`--env-file` matters. The repo root `.env` also holds `DEPLOYER_PRIVATE_KEY`, and an `env_file:` entry
+would inject the whole file into the container — handing the keeper the deploy key it must never have,
+and rendering that key on the terminal of anyone who runs `docker compose config`. The flag makes the
+root `.env` an *interpolation* source only; the explicit `environment:` list in `docker-compose.yml` is
+the allowlist of what actually reaches the process. To inspect the stack without rendering any secret:
+
+```bash
+docker compose --env-file ../.env config --no-interpolate
 ```
 
 ### 11.3 What it does, and when

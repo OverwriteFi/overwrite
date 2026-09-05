@@ -1,8 +1,8 @@
 import { privateKeyToAccount } from "viem/accounts";
 import { createClients } from "./chain/clients.js";
 import { buildKeeperAllowTable, createSender, sleep } from "./chain/tx.js";
-import { activeVaults, loadConfig, loadEnv } from "./config.js";
-import { createLogger } from "./logger.js";
+import { activeVaults, loadConfig, loadEnv, type Env } from "./config.js";
+import { createLogger, type Logger } from "./logger.js";
 import { Alerter } from "./monitor/alerts.js";
 import { runChecks, worst, type Check } from "./monitor/checks.js";
 import { GuardianModule } from "./monitor/guardian.js";
@@ -20,8 +20,25 @@ import { verifyStartup } from "./startup.js";
  * wall time only paces the loop.
  */
 
-const env = loadEnv();
-const log = createLogger(env.LOG_LEVEL);
+/**
+ * Config has to be read before there is a logger to report a config failure with, so the bootstrap
+ * gets its own handler. Without it the commonest misconfiguration of all — `KEEPER_PRIVATE_KEY` not
+ * set — throws during module evaluation, escapes `main().catch()` entirely, and greets the operator
+ * with a raw V8 stack instead of one line saying which variable is wrong. `loadEnv` never echoes a
+ * value, so the message is always safe to print.
+ */
+function bootstrap(): { env: Env; log: Logger } {
+  let env: Env;
+  try {
+    env = loadEnv();
+  } catch (err) {
+    process.stderr.write(`keeper: ${err instanceof Error ? err.message : String(err)}\n`);
+    process.exit(1);
+  }
+  return { env, log: createLogger(env.LOG_LEVEL) };
+}
+
+const { env, log } = bootstrap();
 
 async function main(): Promise<void> {
   const keeper = privateKeyToAccount(env.KEEPER_PRIVATE_KEY as `0x${string}`);
