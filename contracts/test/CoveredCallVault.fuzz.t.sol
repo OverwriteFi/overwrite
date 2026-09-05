@@ -49,6 +49,13 @@ contract CoveredCallVaultFuzzTest is BaseTest {
         assertEq(burned, pw);
         uint256 left = vault.balanceOf(alice);
         uint256 pr = vault.previewRedeem(left);
+        if (pr == 0) {
+            // audit N-1: a redeem that would pay nothing is refused instead of burning the shares
+            vm.prank(alice);
+            vm.expectRevert(CoveredCallVault.ZeroAmount.selector);
+            vault.redeem(left, alice, alice);
+            return;
+        }
         vm.prank(alice);
         uint256 got = vault.redeem(left, alice, alice);
         assertEq(got, pr);

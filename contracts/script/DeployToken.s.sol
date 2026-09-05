@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: MIT
 pragma solidity 0.8.26;
 
+import {TimelockController} from "@openzeppelin/contracts/governance/TimelockController.sol";
 import {Script} from "forge-std/Script.sol";
 import {console2} from "forge-std/console2.sol";
 
@@ -37,9 +38,18 @@ import {Ownable} from "@openzeppelin/contracts/access/Ownable.sol";
 /// `CapController.setSafetyModule` + `setCapWeightBps` + `setCapMode(SAFETY_MODULE)`, the FeeRouter WRITE mode,
 /// and the four-call BondManager migration.
 contract DeployToken is Script {
+    /// @dev `TIMELOCK_ADDRESS` must be the 48 h timelock, not any address that happens to be in the env (audit C-5):
+    /// every token-layer contract and 700 M WRITE would otherwise be owned by an undelayed key with the script's own
+    /// ownership asserts passing.
+    function _timelock() internal view returns (address t) {
+        t = vm.envAddress("TIMELOCK_ADDRESS");
+        require(t.code.length != 0, "TIMELOCK_ADDRESS has no code");
+        require(TimelockController(payable(t)).getMinDelay() >= 48 hours, "TIMELOCK_ADDRESS is not the 48 h timelock");
+    }
+
     function _params() internal view returns (TokenDeployLib.Params memory) {
         return TokenDeployLib.Params({
-            owner: vm.envAddress("TIMELOCK_ADDRESS"),
+            owner: _timelock(),
             treasury: vm.envAddress("TREASURY_ADDRESS"),
             usdg: vm.envAddress("USDG_ADDRESS"),
             usdgUsdFeed: vm.envAddress("USDG_USD_FEED"),

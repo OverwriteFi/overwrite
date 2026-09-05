@@ -7,6 +7,11 @@ import {Ownable2Step} from "@openzeppelin/contracts/access/Ownable2Step.sol";
 import {IRiskModule} from "./interfaces/IRiskModule.sol";
 import {OracleParams} from "./Types.sol";
 
+/// @dev The one getter `setSettlementOracle` needs; kept local so this file imports no oracle code.
+interface ISettlementOracleWiring {
+    function riskModule() external view returns (address);
+}
+
 /// @title RiskModule
 /// @notice Pause registry, halt registry, guardian role and versioned oracle parameters (SPEC §6, §9.6, §15;
 /// D-005, D-012, D-029, D-031, D-050). The owner is the 48 h timelock: it sets parameters and guardians. The
@@ -80,6 +85,7 @@ contract RiskModule is Ownable2Step, AccessControl, IRiskModule {
     error NotGuardian();
     error OutOfBounds(bytes32 key);
     error RenounceDisabled();
+    error Miswired(bytes32 what);
 
     event Paused(address indexed vault, bytes32 indexed what, address indexed by);
     event Unpaused(address indexed vault, bytes32 indexed what, address indexed by);
@@ -148,6 +154,7 @@ contract RiskModule is Ownable2Step, AccessControl, IRiskModule {
     function setSettlementOracle(address oracle) external onlyOwner {
         if (oracle == address(0)) revert ZeroAddress();
         if (settlementOracle != address(0)) revert AlreadySet();
+        if (ISettlementOracleWiring(oracle).riskModule() != address(this)) revert Miswired("ORACLE_RISK_MODULE"); // C-3
         settlementOracle = oracle;
         emit SettlementOracleSet(oracle);
     }

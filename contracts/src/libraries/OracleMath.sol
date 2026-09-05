@@ -14,10 +14,14 @@ library OracleMath {
     /// @notice Time-weighted average tick over `window` seconds, rounded toward negative infinity
     /// (Uniswap OracleLibrary.consult convention).
     function twapTick(int56 tickCumulativeDelta, uint32 window) internal pure returns (int24 tick) {
+        tick = int24(twapTick56(tickCumulativeDelta, window));
+    }
+
+    /// @notice The same floor, before the `int24` cast, so a caller can range-check it (audit A-01 / R-4).
+    function twapTick56(int56 tickCumulativeDelta, uint32 window) internal pure returns (int56 t) {
         int56 w = int56(uint56(window));
-        int56 t = tickCumulativeDelta / w;
+        t = tickCumulativeDelta / w;
         if (tickCumulativeDelta < 0 && tickCumulativeDelta % w != 0) t--;
-        tick = int24(t);
     }
 
     /// @notice Harmonic-mean in-range liquidity over the window: `(window << 128) / Δ secondsPerLiquidityX128`

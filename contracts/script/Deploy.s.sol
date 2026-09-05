@@ -161,8 +161,10 @@ contract Deploy is Script {
 
     /// @notice True when this run can drive governance itself: the delay is zero and the broadcaster is the
     /// admin EOA that holds PROPOSER and EXECUTOR. On 4663 both halves are false by construction.
+    /// @dev The direct schedule-and-execute path exists for the single-key testnet only, and only when the config
+    /// says so out loud (audit C-1): a mis-edited delay alone must never make the script execute governance itself.
     function _governanceIsUs(DeployConfig memory c, address deployer) internal pure returns (bool) {
-        return c.gov.timelockMinDelay == 0 && c.gov.admin == deployer;
+        return c.gov.deployerIsAdmin && c.gov.timelockMinDelay == 0 && c.gov.admin == deployer;
     }
 
     function _runBatch(

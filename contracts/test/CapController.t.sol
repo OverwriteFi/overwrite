@@ -161,7 +161,20 @@ contract CapControllerTest is BaseTest {
         cap.setPriceSource(address(0));
         cap.setPriceSource(address(0xBEEF));
         assertEq(address(cap.priceSource()), address(0xBEEF));
+        // audit G-1: one-way freeze; refuses an address without code
+        vm.expectRevert(abi.encodeWithSelector(CapController.NotAContract.selector, address(0xBEEF)));
+        cap.freezePriceSource();
+        cap.setPriceSource(address(priceSource));
+        cap.freezePriceSource();
+        assertTrue(cap.priceSourceFrozen());
+        vm.expectRevert(CapController.PriceSourceFrozen.selector);
+        cap.setPriceSource(address(0xBEEF));
+        vm.expectRevert(CapController.PriceSourceFrozen.selector);
+        cap.freezePriceSource();
         vm.stopPrank();
+        vm.prank(address(0xBEEF));
+        vm.expectRevert(abi.encodeWithSelector(Ownable.OwnableUnauthorizedAccount.selector, address(0xBEEF)));
+        cap.freezePriceSource();
     }
 
     function test_setters_onlyOwner() public {

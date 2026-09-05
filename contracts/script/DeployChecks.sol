@@ -28,7 +28,7 @@ import {ISettlementOracle} from "../src/interfaces/ISettlementOracle.sol";
 import {AggregatorV3Interface} from "../src/interfaces/AggregatorV3Interface.sol";
 import {IUniswapV3Pool} from "../src/interfaces/IUniswapV3Pool.sol";
 import {TickMath} from "../src/libraries/TickMath.sol";
-import {VaultState} from "../src/Types.sol";
+import {SeriesKind, VaultState} from "../src/Types.sol";
 
 import {Ownable2Step} from "@openzeppelin/contracts/access/Ownable2Step.sol";
 import {IAccessControl} from "@openzeppelin/contracts/access/IAccessControl.sol";
@@ -122,6 +122,8 @@ library DeployChecks {
     function assertTimelock(DeployConfig memory c, Deployed memory d) internal view {
         TimelockController t = TimelockController(payable(d.timelock));
         require(t.getMinDelay() == c.gov.timelockMinDelay, "timelock: minDelay");
+        // Independent of the config: a strict deployment is a 48 h one (audit C-1).
+        if (c.chainId == 4663) require(t.getMinDelay() >= 48 hours, "timelock: minDelay below 48 h");
         require(t.hasRole(PROPOSER_ROLE, c.gov.admin), "timelock: admin is not proposer");
         require(t.hasRole(EXECUTOR_ROLE, c.gov.admin), "timelock: admin is not executor");
         require(t.hasRole(CANCELLER_ROLE, c.gov.admin), "timelock: admin is not canceller");
@@ -168,6 +170,8 @@ library DeployChecks {
             address(CapController(d.capController).priceSource()) == d.settlementOracle,
             "capController: priceSource still placeholder"
         );
+        require(ah.priceSourceFrozen(), "auctionHouse: priceSource not frozen");
+        require(CapController(d.capController).priceSourceFrozen(), "capController: priceSource not frozen");
         require(address(ah.optionToken()) == d.optionToken, "auctionHouse: optionToken");
         require(address(ah.bondManager()) == d.bondManager, "auctionHouse: bondManager");
         require(address(ah.feeRouter()) == d.feeRouter, "auctionHouse: feeRouter");
@@ -256,6 +260,24 @@ library DeployChecks {
             require(cap.capWeightBps(v) == 0, "cap: weight set before the switch");
             require(fr.feeBps(v) == c.vaults[i].feeBps, "feeRouter: feeBps");
             require(fr.mode(v) == IFeeRouter.FeeMode.USDG, "feeRouter: mode is not USDG");
+            // The RS-11 floors against a rogue keeper, whether batch A had to set them or the defaults stood (C-4).
+            AuctionHouse ahp = AuctionHouse(d.auctionHouse);
+            require(
+                ahp.minStrikeDistanceBps(v, SeriesKind.WEEKDAY) == c.vaults[i].minStrikeWeekday,
+                "auctionHouse: minStrikeDistanceBps weekday"
+            );
+            require(
+                ahp.minStrikeDistanceBps(v, SeriesKind.WEEKEND) == c.vaults[i].minStrikeWeekend,
+                "auctionHouse: minStrikeDistanceBps weekend"
+            );
+            require(
+                ahp.minReserveBpsOfSpot(v, SeriesKind.WEEKDAY) == c.vaults[i].minReserveWeekday,
+                "auctionHouse: minReserveBpsOfSpot weekday"
+            );
+            require(
+                ahp.minReserveBpsOfSpot(v, SeriesKind.WEEKEND) == c.vaults[i].minReserveWeekend,
+                "auctionHouse: minReserveBpsOfSpot weekend"
+            );
             _assertOracleParams(c, d, i);
         }
     }

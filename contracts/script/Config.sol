@@ -90,6 +90,7 @@ library Config {
     error OutOfBounds(string key, uint256 value);
     error NoVaults();
     error DuplicateStock(address stock);
+    error MainnetGovernance(string what);
 
     function path(uint256 chainId) internal pure returns (string memory) {
         return string.concat("config/", vm.toString(chainId), ".json");
@@ -204,6 +205,7 @@ library Config {
             if (c.gov.guardians[i] == address(0)) revert MissingAddress("governance.guardians[]");
         }
         if (c.ext.priceSourcePlaceholder == address(0)) revert MissingAddress("external.priceSourcePlaceholder");
+        if (c.chainId == 4663) _validateMainnetGovernance(c);
         if (!mocked) {
             if (c.ext.usdg == address(0)) revert MissingAddress("external.usdg");
             if (c.ext.usdgUsdFeed == address(0)) revert MissingAddress("external.usdgUsdFeed");
@@ -218,6 +220,21 @@ library Config {
                 }
             }
         }
+    }
+
+    /// @dev SPEC §15 / D-003 / D-029 pinned in code, not left to the operator's edit of the JSON (audit C-1): a 48 h
+    /// delay, no deployer-as-admin deviation, exactly two guardian holders, and four pairwise-distinct keys.
+    function _validateMainnetGovernance(DeployConfig memory c) private pure {
+        if (c.gov.timelockMinDelay < 48 hours) revert MainnetGovernance("timelockMinDelay < 48h");
+        if (c.gov.deployerIsAdmin) revert MainnetGovernance("deployerIsAdmin");
+        if (c.gov.guardians.length != 2) revert MainnetGovernance("guardians != 2");
+        address[4] memory keys = [c.gov.admin, c.gov.keeper, c.gov.guardians[0], c.gov.guardians[1]];
+        for (uint256 i; i < 4; ++i) {
+            for (uint256 j; j < i; ++j) {
+                if (keys[i] == keys[j]) revert MainnetGovernance("admin, keeper and guardians must be distinct");
+            }
+        }
+        if (c.gov.treasury == c.gov.keeper) revert MainnetGovernance("treasury == keeper");
     }
 
     function _validateToken(TokenCfg memory t) private pure {

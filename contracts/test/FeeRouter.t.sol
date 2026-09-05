@@ -20,6 +20,7 @@ contract FeeRouterTest is Test {
     function setUp() public {
         usdg = new MockUSDG();
         fr = new FeeRouter(address(usdg), admin, treasury);
+        vm.mockCall(ah, abi.encodeWithSignature("feeRouter()"), abi.encode(address(fr))); // C-3 back-pointer
         vm.prank(admin);
         fr.setAuctionHouse(ah);
         vm.prank(ah);
@@ -52,6 +53,10 @@ contract FeeRouterTest is Test {
         vm.prank(ah);
         vm.expectRevert(FeeRouter.NotAuctionHouse.selector);
         fresh.initVault(vault);
+        // C-3: an AuctionHouse that points at another router is refused
+        vm.prank(admin);
+        vm.expectRevert(abi.encodeWithSelector(FeeRouter.Miswired.selector, bytes32("AUCTION_HOUSE")));
+        fresh.setAuctionHouse(ah);
     }
 
     function test_initVault_setsDefaultOnce() public {

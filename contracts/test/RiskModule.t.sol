@@ -23,6 +23,7 @@ contract RiskModuleTest is Test {
     function setUp() public {
         vm.warp(1_788_344_808);
         rm = new RiskModule(admin);
+        vm.mockCall(oracle, abi.encodeWithSignature("riskModule()"), abi.encode(address(rm))); // C-3 back-pointer
         vm.startPrank(admin);
         rm.setSettlementOracle(oracle);
         rm.setGuardian(hot, true);
@@ -51,6 +52,10 @@ contract RiskModuleTest is Test {
         fresh.setSettlementOracle(address(0));
         vm.prank(rando);
         vm.expectRevert(abi.encodeWithSelector(Ownable.OwnableUnauthorizedAccount.selector, rando));
+        fresh.setSettlementOracle(oracle);
+        // C-3: an oracle wired to another RiskModule is refused
+        vm.prank(admin);
+        vm.expectRevert(abi.encodeWithSelector(RiskModule.Miswired.selector, bytes32("ORACLE_RISK_MODULE")));
         fresh.setSettlementOracle(oracle);
     }
 

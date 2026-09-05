@@ -147,6 +147,7 @@ contract SettlementOracle is Ownable2Step, ReentrancyGuard, IPriceSource, ISettl
     error InvalidRound(uint80 roundId);
     error NoReferencePrice();
     error RenounceDisabled();
+    error BadObsHint(uint16 index);
 
     // ───────────────────────────── events ─────────────────────────────
 
@@ -239,7 +240,7 @@ contract SettlementOracle is Ownable2Step, ReentrancyGuard, IPriceSource, ISettl
         Ctx memory c = _load(seriesId);
         (bool ok, bytes32 reason, Round memory ref) = _haltCheck(c, hint);
         if (!ok) revert CannotHalt(reason);
-        uint256 resolveRef = ref.exists && ref.answer > 0 ? ref.answer : c.sRef;
+        uint256 resolveRef = _resolveRefFor(c, hint.refRoundId, ref);
         SeriesRecord storage rec = _records[seriesId];
         rec.halted = true;
         rec.haltedAt = uint64(block.timestamp);
@@ -534,6 +535,20 @@ contract SettlementOracle is Ownable2Step, ReentrancyGuard, IPriceSource, ISettl
         return (false, "PATH_AVAILABLE", ref);
     }
 
+    /// @dev The centre of the resolution band (D-022): the verified reference round when the hint supplied one.
+    /// Past the 7-day backstop an unusable hint no longer reverts (D-057), so without this the caller could pick
+    /// between two band centres — the Friday round or `sRef` — by withholding the hint (audit G-2). The fallback
+    /// is therefore derived on-chain: the hinted round if it is a valid round at or before expiry (even when it is
+    /// not provably the last one), else the feed's latest round if that is at or before expiry, else `sRef`.
+    function _resolveRefFor(Ctx memory c, uint80 hintId, Round memory ref) internal view returns (uint256) {
+        if (ref.exists && ref.answer > 0) return ref.answer;
+        Round memory alt = _round(c.cfg.feed, hintId);
+        if (alt.exists && alt.answer > 0 && alt.updatedAt <= c.expiry) return alt.answer;
+        alt = _latest(c.cfg.feed);
+        if (alt.exists && alt.answer > 0 && alt.updatedAt <= c.expiry) return alt.answer;
+        return c.sRef;
+    }
+
     function _finish(Ctx memory c, uint8 path, uint256 price8, uint80 roundId) internal {
         SeriesRecord storage rec = _records[c.seriesId];
         rec.path = path;
@@ -578,6 +593,8 @@ contract SettlementOracle is Ownable2Step, ReentrancyGuard, IPriceSource, ISettl
 
     // ═════════════════════════════ internals: Chainlink rounds ═════════════════════════════
 
+    /// @dev An answer above `uint128.max` can never be a settlement price (`_jumpOk` fails it, the vault stores
+    /// `uint128`), and `halt` would revert casting it into `resolveRef`; it is treated like `answer <= 0` (R-5).
     function _round(AggregatorV3Interface feed, uint80 id) internal view returns (Round memory r) {
         if (id == 0) return r;
         try feed.getRoundData(id) returns (uint80, int256 answer, uint256, uint256 updatedAt, uint80) {
@@ -585,7 +602,7 @@ contract SettlementOracle is Ownable2Step, ReentrancyGuard, IPriceSource, ISettl
             r.id = id;
             r.exists = true;
             r.updatedAt = updatedAt;
-            if (answer > 0) r.answer = uint256(answer);
+            if (answer > 0 && uint256(answer) <= type(uint128).max) r.answer = uint256(answer);
         } catch {}
     }
 
@@ -595,8 +612,12 @@ contract SettlementOracle is Ownable2Step, ReentrancyGuard, IPriceSource, ISettl
             r.id = id;
             r.exists = true;
             r.updatedAt = updatedAt;
-            if (answer > 0) r.answer = uint256(answer);
+            if (answer > 0 && uint256(answer) <= type(uint128).max) r.answer = uint256(answer);
         } catch {}
+    }
+
+    function _firstOfNextPhase(uint80 id) internal pure returns (uint80) {
+        return (((id >> 64) + 1) << 64) | 1;
     }
 
     /// @dev Phase-aware successor (SPEC §9.1): `(p, a+1)` if it exists, else `(p+1, 1)`, else none.
@@ -619,6 +640,11 @@ contract SettlementOracle is Ownable2Step, ReentrancyGuard, IPriceSource, ISettl
         returns (bool)
     {
         if (!r.exists || r.answer == 0 || r.updatedAt > ts) return false;
+        // During a proxy phase change the old aggregator keeps publishing for a while, so both phases can hold a
+        // "last round at or before expiry". The reference must come from the newest phase that has one (R-2).
+        if (_round(feed, _firstOfNextPhase(r.id)).updatedAt <= ts && _round(feed, _firstOfNextPhase(r.id)).exists) {
+            return false;
+        }
         Round memory n = _next(feed, r.id);
         for (uint256 i; i < MAX_GARBAGE_SKIP; ++i) {
             if (!n.exists || n.updatedAt > ts) return true;
@@ -639,6 +665,9 @@ contract SettlementOracle is Ownable2Step, ReentrancyGuard, IPriceSource, ISettl
         uint80 phase = r.id >> 64;
         uint80 agg = r.id & type(uint64).max;
         if (agg > 1) {
+            // R-2: if the next phase already published before `r`, the first round after `ts` lives there.
+            Round memory np = _round(feed, _firstOfNextPhase(r.id));
+            if (np.exists && np.updatedAt < r.updatedAt) return false;
             Round memory p = _round(feed, (phase << 64) | (agg - 1));
             return p.exists && p.updatedAt <= ts;
         }
@@ -760,7 +789,11 @@ contract SettlementOracle is Ownable2Step, ReentrancyGuard, IPriceSource, ISettl
                 dSpl = spl[1] - spl[0];
             }
             if (dSpl == 0) return (0, 0, false);
-            return (OracleMath.twapTick(dTick, window), OracleMath.harmonicLiquidity(window, dSpl), true);
+            // A real pool cannot average outside the tick range, but `getSqrtRatioAtTick` reverts on one that does,
+            // and that revert would escape the try/catch and brick `settle` instead of failing the path (audit A-01).
+            int56 t = OracleMath.twapTick56(dTick, window); // the floored value the cast would truncate (R-4)
+            if (t < TickMath.MIN_TICK || t > TickMath.MAX_TICK) return (0, 0, false);
+            return (int24(t), OracleMath.harmonicLiquidity(window, dSpl), true);
         } catch {
             return (0, 0, false);
         }
@@ -768,15 +801,27 @@ contract SettlementOracle is Ownable2Step, ReentrancyGuard, IPriceSource, ISettl
 
     /// @dev D-019 / D-053: at least `minObs` observations inside `[anchor − window, anchor]` and the newest one at
     /// or before `anchor` no older than `MAX_LAST_OBS_AGE`. The walk starts at `obsHint` (the live head when
-    /// anchored at now) and reads at most `minObs + 1` entries. A hint older than the true latest observation can
-    /// only under-count, never pass a quiet window, so a wrong hint fails the path instead of reverting.
+    /// anchored at now) and reads at most `minObs + 2` entries. The hint is **verified** as the newest observation
+    /// at or before the anchor (audit R-1): an older hint would under-count and fail the path, which on a WEEKEND
+    /// series would hand whoever calls first the choice between the TWAP and the first Monday round (T-08). So a
+    /// hint that is uninitialised, after the anchor, or has a newer observation still at or before the anchor
+    /// reverts `BadObsHint`, exactly as a wrong round hint does. If `observe` succeeded the window's start lies
+    /// inside the ring, so a correct hint always exists.
     function _observationsOk(IUniswapV3Pool pool, TwapArgs memory a, uint8 minObs) internal view returns (bool) {
         (,, uint16 index, uint16 card,,,) = pool.slot0();
         if (card == 0) return false;
         uint32 anchor = uint32(block.timestamp) - a.secondsAgoEnd;
         uint16 i = a.anchoredNow ? index : a.obsHint;
-        if (i >= card) return false;
+        if (i >= card) {
+            if (a.anchoredNow) return false;
+            revert BadObsHint(i);
+        }
         (uint32 ts,,, bool init) = pool.observations(i);
+        if (!a.anchoredNow) {
+            if (!init || ts > anchor) revert BadObsHint(i);
+            (uint32 nts,,, bool ninit) = pool.observations(i + 1 == card ? 0 : i + 1);
+            if (ninit && nts > ts && nts <= anchor) revert BadObsHint(i);
+        }
         if (!init || ts > anchor || ts + MAX_LAST_OBS_AGE < anchor) return false;
         uint32 lo = anchor > a.window ? anchor - a.window : 0;
         uint256 n;

@@ -169,6 +169,7 @@ contract AuctionHandler is Test {
         uint256 max = vault.maxRedeem(d);
         if (max == 0) return;
         uint256 shares = bound(frac, 1, max);
+        if (vault.previewRedeem(shares) == 0) return; // audit N-1: refused on purpose
         vm.prank(d);
         vault.redeem(shares, d, d);
     }

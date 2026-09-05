@@ -42,10 +42,11 @@ ROOT="$(pwd)"
 
 # .env lives at the repo root and is gitignored; .env.example has placeholders only.
 [ -f "../.env" ] || { echo "no ../.env -- copy .env.example and fill it in" >&2; exit 1; }
-set -a
+# Source .env in a subshell-free way that does NOT export everything (audit C-7): only the variables this
+# script reads are re-exported below, so DEPLOYER_PRIVATE_KEY never lands in a child process environment.
 # shellcheck disable=SC1091
 . ../.env
-set +a
+export ROBINHOOD_RPC_URL ROBINHOOD_TESTNET_RPC_URL BLOCKSCOUT_API_KEY 2>/dev/null || true
 
 export PATH="$HOME/.foundry/bin:$PATH"
 
@@ -60,6 +61,10 @@ case "$RPC" in http*) ;; *) RPC="https://$RPC" ;; esac
 
 # ── signer ───────────────────────────────────────────────────────────────────
 # Held in "$@" so the key is never interpolated into a string that could be printed.
+# Mainnet signs on the hardware wallet, full stop (RUNBOOK §2, D-003); a raw key is a testnet convenience.
+if [ "$CHAIN" = 4663 ] && [ "$SIGNER" != --ledger ]; then
+  echo "chain 4663 deploys with --ledger only" >&2; exit 1
+fi
 case "$SIGNER" in
   --ledger)
     set -- --ledger

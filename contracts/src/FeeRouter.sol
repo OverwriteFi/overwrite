@@ -12,6 +12,11 @@ import {IERC20Burnable} from "./interfaces/IERC20Burnable.sol";
 import {IFeeRouter} from "./interfaces/IFeeRouter.sol";
 import {IWritePriceOracle} from "./interfaces/IWritePriceOracle.sol";
 
+/// @dev The one getter `setAuctionHouse` needs; kept local so this file imports no AuctionHouse code.
+interface IAuctionHouseFeeWiring {
+    function feeRouter() external view returns (address);
+}
+
 /// @title FeeRouter
 /// @notice Performance fee on premium (SPEC §11): `feeBps` per vault (default 10 %, bound [0, 20 %]), booked
 /// by `collect` at clearing and settled by the permissionless `flush` (D-023). In USDG mode the fee goes to
@@ -203,6 +208,7 @@ contract FeeRouter is IFeeRouter, Ownable2Step, ReentrancyGuard {
     function setAuctionHouse(address auctionHouse_) external onlyOwner {
         if (auctionHouse_ == address(0)) revert ZeroAddress();
         if (auctionHouse != address(0)) revert AlreadySet();
+        if (IAuctionHouseFeeWiring(auctionHouse_).feeRouter() != address(this)) revert Miswired("AUCTION_HOUSE"); // C-3
         auctionHouse = auctionHouse_;
         emit AuctionHouseSet(auctionHouse_);
     }

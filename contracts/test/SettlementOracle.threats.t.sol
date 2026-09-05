@@ -114,8 +114,9 @@ contract SettlementOracleThreatsTest is SettlementBaseTest {
         uint80 r1 = _feedRoundAt(e - 3 hours, 220e8);
         uint80 r2 = _feedRoundAt(e - 1 hours, 210e8);
         vm.warp(e);
+        ISettlementOracle.Hint memory h_1 = _hint(r1);
         vm.expectRevert(abi.encodeWithSelector(SettlementOracle.BadRefRoundHint.selector, r1));
-        oracle.settle(id, _hint(r1)); // the keeper cannot pick the more favourable earlier round
+        oracle.settle(id, h_1); // the keeper cannot pick the more favourable earlier round
         oracle.settle(id, _hint(r2));
         assertEq(vault.series(id).settlementPrice, 210e8);
     }
@@ -307,8 +308,9 @@ contract SettlementOracleThreatsTest is SettlementBaseTest {
         uint64 e = vault.series(id).expiry;
         uint80 stale = _feedRoundAt(e - 27 hours, PRICE);
         vm.warp(e + 1801);
+        ISettlementOracle.Hint memory h_2 = _hint(stale);
         vm.prank(bob);
-        oracle.halt(id, _hint(stale));
+        oracle.halt(id, h_2);
         uint80 after_ = _feedRoundAt(e + 3 days, 205e8);
         vm.warp(e + 7 days);
         vm.prank(bob);

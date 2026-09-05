@@ -645,6 +645,100 @@ contract CoveredCallVaultTest is BaseTest {
         vault.claimPremium(address(0));
     }
 
+    /// @dev Audit F-1: a redeem request left over from the previous settlement is executed at the open, at the
+    /// post-settlement price, and never sits inside the next series' NAV.
+    function test_openSeries_drainsCarriedRedeemsFirst() public {
+        vm.prank(admin);
+        vault.setMaxQueueOps(50, 1);
+        _deposit(alice, 100e18);
+        _deposit(bob, 100e18);
+        (uint256 sid,) = _open(K);
+        _clear(sid, 200e18, 0);
+        vm.prank(alice);
+        vault.requestRedeem(50e24, alice);
+        vm.prank(bob);
+        vault.requestRedeem(100e24, bob);
+        _settle(sid, K, 1); // one op: alice's request only; bob's is carried
+        assertEq(vault.redeemQueueHead(), 1);
+        assertEq(vault.escrowedRedeemShares(), 100e24);
+        uint256 priceBefore = _sharePrice();
+        (uint256 sid2, uint256 offered) = _open(K);
+        assertEq(vault.redeemQueueHead(), 2, "the carried request was executed at the open");
+        assertEq(vault.escrowedRedeemShares(), 0);
+        assertEq(vault.withdrawalClaimable(bob), 100e18, "at the post-settlement price");
+        assertEq(offered, 50e18, "the offer is exactly the assets of the shares that stay");
+        assertEq(vault.totalAssets(), 50e18);
+        assertEq(_sharePrice(), priceBefore, "draining moves no value between shares");
+        // bob bears nothing of the new series: an ITM settlement leaves his claim untouched
+        _clear(sid2, 50e18, 0);
+        _settle(sid2, uint128(K * 2), 1);
+        assertEq(vault.withdrawalClaimable(bob), 100e18);
+        vm.prank(bob);
+        assertEq(vault.claimWithdrawal(bob), 100e18);
+    }
+
+    /// @dev Audit F-1: more queued redeems than one open can visit refuse the open with a reason, and the
+    /// permissionless `processRedeems` clears the way; the queue cannot grow in IDLE, so this is not griefable.
+    function test_openSeries_refusesUndrainedRedeemQueue() public {
+        vm.prank(admin);
+        vault.setMaxQueueOps(2, 1);
+        _deposit(alice, 100e18);
+        (uint256 sid,) = _open(K);
+        _clear(sid, 100e18, 0);
+        for (uint256 i; i < 4; ++i) {
+            vm.prank(alice);
+            vault.requestRedeem(1e24, alice);
+        }
+        _settle(sid, K, 1); // one processed, three left
+        (bool ok, bytes32 reason) = vault.canOpenAuction(_expiry());
+        assertFalse(ok);
+        assertEq(reason, bytes32("REDEEM_QUEUE"));
+        vm.prank(auction);
+        vm.expectRevert(abi.encodeWithSelector(CoveredCallVault.CannotOpen.selector, bytes32("REDEEM_QUEUE")));
+        vault.openSeries(SeriesKind.WEEKDAY, K, _expiry());
+        vm.prank(alice);
+        vm.expectRevert(CoveredCallVault.VaultIsIdle.selector);
+        vault.requestRedeem(1e24, alice); // cannot be refilled while IDLE
+        vault.processRedeems(1); // two left: within maxQueueOpsPerOpen, the open drains them itself
+        (ok,) = vault.canOpenAuction(_expiry());
+        assertTrue(ok);
+        (, uint256 offered) = _open(K);
+        assertEq(vault.escrowedRedeemShares(), 0);
+        assertEq(offered, 96e18);
+    }
+
+    /// @dev Audit N-1: a redeem that would pay zero assets is refused instead of burning the shares.
+    function test_redeem_refusesZeroAssets() public {
+        _deposit(alice, 100e18);
+        vm.prank(alice);
+        vm.expectRevert(CoveredCallVault.ZeroAmount.selector);
+        vault.redeem(0, alice, alice);
+        vm.prank(alice);
+        vm.expectRevert(CoveredCallVault.ZeroAmount.selector);
+        vault.withdraw(0, alice, alice);
+        // issuer burns every token the vault holds: shares survive for a later coverage injection
+        vm.prank(stock.owner());
+        stock.burn(address(vault), 100e18);
+        assertEq(vault.totalAssets(), 0);
+        vm.prank(alice);
+        vm.expectRevert(CoveredCallVault.ZeroAmount.selector);
+        vault.redeem(100e24, alice, alice);
+        assertEq(vault.balanceOf(alice), 100e24, "shares were not burned for nothing");
+    }
+
+    /// @dev Audit R-3: a claim is capped at the vault's USDG balance and the remainder stays credited.
+    function test_claimPremium_cappedAtBalance() public {
+        _deposit(alice, 100e18);
+        _openAndClear(K, 1_000e6);
+        // model accumulated split dust: the vault holds one unit less than the sum of credits
+        vm.prank(address(vault));
+        usdg.transfer(bob, 1);
+        vm.prank(alice);
+        uint256 got = vault.claimPremium(alice);
+        assertEq(got, 1_000e6 - 1);
+        assertEq(vault.premiumClaimable(alice), 1, "the unit stays credited");
+    }
+
     function test_premium_escrowedRedeemSharesExcluded() public {
         _deposit(alice, 100e18);
         _deposit(bob, 100e18);

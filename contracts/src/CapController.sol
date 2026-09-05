@@ -26,6 +26,9 @@ contract CapController is Ownable2Step, ICapController {
 
     CapMode public capMode;
     IPriceSource public priceSource;
+    /// @notice Once true, `setPriceSource` is disabled forever (audit G-1): a fake `S_cap` would let a compromised
+    /// timelock open every cap, and the same source feeds `AuctionHouse.referencePrice`.
+    bool public priceSourceFrozen;
     ISafetyModule public safetyModule;
     uint256 public k = 5e18; // WAD, D-011
     uint256 public totalWeightBps;
@@ -37,6 +40,8 @@ contract CapController is Ownable2Step, ICapController {
     error SafetyModuleNotSet();
     error WeightsExceedTotal();
     error RenounceDisabled();
+    error PriceSourceFrozen();
+    error NotAContract(address target);
 
     event ParameterChanged(address indexed target, bytes32 key, uint256 oldValue, uint256 newValue);
 
@@ -51,8 +56,17 @@ contract CapController is Ownable2Step, ICapController {
     /// price source is SettlementOracle, which does not exist yet.
     function setPriceSource(address src) external onlyOwner {
         if (src == address(0)) revert ZeroAddress();
+        if (priceSourceFrozen) revert PriceSourceFrozen();
         emit ParameterChanged(address(this), "priceSource", uint160(address(priceSource)), uint160(src));
         priceSource = IPriceSource(src);
+    }
+
+    /// @notice One-way: disables `setPriceSource` forever (audit G-1). Refuses a placeholder without code.
+    function freezePriceSource() external onlyOwner {
+        if (priceSourceFrozen) revert PriceSourceFrozen();
+        if (address(priceSource).code.length == 0) revert NotAContract(address(priceSource));
+        priceSourceFrozen = true;
+        emit ParameterChanged(address(this), "priceSourceFrozen", 0, 1);
     }
 
     /// @dev Clearing the module while SAFETY_MODULE mode is active would make every cap read revert

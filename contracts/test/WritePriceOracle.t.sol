@@ -208,6 +208,25 @@ contract WritePriceOracleTest is TokenBaseTest {
         assertEq(reason, bytes32("USDG_DEPEG"));
     }
 
+    /// @dev Audit A-01 / A-02: cumulatives that average outside the tick range, or that wrap, are classified,
+    /// never allowed to revert a view both consumers rely on.
+    function test_writePrice_notOkOnOutOfRangeTick() public {
+        int56[] memory tcs = new int56[](2);
+        uint160[] memory spls = new uint160[](2);
+        tcs[1] = int56(uint56(wOracle.twapWindow())) * 1_000_000;
+        spls[0] = type(uint160).max; // a wrapped secondsPerLiquidity cumulative must not revert either
+        spls[1] = 1;
+        vm.mockCall(
+            address(writePool), abi.encodeWithSelector(bytes4(keccak256("observe(uint32[])"))), abi.encode(tcs, spls)
+        );
+        (uint256 price8, bool ok) = wOracle.writePrice();
+        assertFalse(ok);
+        assertEq(price8, 0);
+        (, bytes32 reason,) = wOracle.previewPrice();
+        assertEq(reason, bytes32("TICK_RANGE"));
+        vm.clearMockedCalls();
+    }
+
     function test_writePrice_notOkOnDeadPool() public {
         writePool.setDead(true);
         (uint256 price8, bool ok) = wOracle.writePrice();

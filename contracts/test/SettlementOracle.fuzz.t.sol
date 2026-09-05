@@ -91,12 +91,13 @@ contract SettlementOracleFuzzTest is SettlementBaseTest {
         } else {
             assertFalse(ok);
             assertEq(reason, bytes32("OBSERVATIONS"), "path 2 reason (no pool activity)");
+            ISettlementOracle.Hint memory hh_1 = _hint(r);
             vm.expectRevert(
                 abi.encodeWithSelector(
                     SettlementOracle.NoOraclePath.selector, bytes32("STALE"), bytes32("OBSERVATIONS")
                 )
             );
-            oracle.settle(id, _hint(r));
+            oracle.settle(id, hh_1);
         }
     }
 
@@ -123,12 +124,13 @@ contract SettlementOracleFuzzTest is SettlementBaseTest {
             oracle.settle(id, _hint(r));
             assertEq(vault.series(id).settlementPrice, s, "no strike or price adjustment (D-002)");
         } else {
+            ISettlementOracle.Hint memory hh_2 = _hint(r);
             vm.expectRevert(
                 abi.encodeWithSelector(
                     SettlementOracle.NoOraclePath.selector, bytes32("JUMP_GUARD"), bytes32("OBSERVATIONS")
                 )
             );
-            oracle.settle(id, _hint(r));
+            oracle.settle(id, hh_2);
         }
     }
 
@@ -238,5 +240,34 @@ contract SettlementOracleFuzzTest is SettlementBaseTest {
         assertEq(p1, p2);
         assertEq(path1, path2);
         assertEq(path1, 2);
+    }
+
+    /// @dev Audit A-01: whatever cumulatives a pool returns, `previewSettle` and `settle` classify the TWAP path
+    /// instead of reverting; an out-of-range average is reported as OBSERVE.
+    function testFuzz_path2_neverRevertsOnArbitraryCumulatives(int56 tcDelta, uint160 splDelta) public {
+        (uint256 id, ISettlementOracle.Hint memory h) = _weekendReadyFuzz();
+        int56[] memory tcs = new int56[](2);
+        uint160[] memory spls = new uint160[](2);
+        tcs[1] = tcDelta;
+        spls[1] = splDelta;
+        vm.mockCall(
+            address(pool), abi.encodeWithSelector(bytes4(keccak256("observe(uint32[])"))), abi.encode(tcs, spls)
+        );
+        (bool ok,,, bytes32 reason) = oracle.previewSettle(id, h); // must not revert
+        int56 avg = tcDelta / int56(uint56(oracle.TWAP_WINDOW_WEEKEND()));
+        if (splDelta == 0 || avg < -887_272 || avg > 887_272) {
+            assertFalse(ok);
+            assertEq(reason, bytes32("NO_ROUND"), "path 3 has no hint; path 2 failed with OBSERVE");
+        }
+        vm.clearMockedCalls();
+    }
+
+    function _weekendReadyFuzz() internal returns (uint256 id, ISettlementOracle.Hint memory h) {
+        id = _liveWeekend();
+        uint64 e = vault.series(id).expiry;
+        h = _hint(feed.roundId(1, nextAgg - 1));
+        h.obsIndex = _seedWindow(e, TICK_200);
+        vm.warp(e + 60);
+        _usdgFresh();
     }
 }

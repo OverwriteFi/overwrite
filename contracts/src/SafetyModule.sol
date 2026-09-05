@@ -182,7 +182,13 @@ contract SafetyModule is Ownable2Step, ReentrancyGuard, ISafetyModule {
 
         uint256 have = sharesOf[msg.sender];
         uint256 shares = req.shares > have ? have : req.shares;
-        assets = previewUnstake(shares);
+        // I-21 (found by the deep campaign): shares and principal must vanish together. The last leaver takes the
+        // whole principal (`previewUnstake` floors, so a slash could leave dust behind zero shares), and a
+        // near-total exit may not take the whole principal either: the virtual `+1` asset of the offset lets
+        // `previewUnstake(totalShares - 1)` round up to `totalStaked`, which would leave worthless shares behind.
+        uint256 all = totalShares;
+        assets = shares == all ? totalStaked : previewUnstake(shares);
+        if (shares != all && assets == totalStaked && assets != 0) assets -= 1;
 
         delete cooldowns[msg.sender];
         sharesOf[msg.sender] = have - shares;

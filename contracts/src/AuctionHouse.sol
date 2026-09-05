@@ -44,6 +44,10 @@ contract AuctionHouse is IAuctionHouse, Ownable2Step, AccessControl, ReentrancyG
     uint64 public constant AUCTION_DURATION = 900;
     uint256 public constant MAX_BIDS = 64;
     uint64 public constant MAX_OPEN_TOLERANCE = 4 hours; // keeps the Monday window inside one epoch week
+    /// @dev Bounds on `clearGrace` (audit F-2): long enough for a keeper restart, short enough that a bidder who
+    /// waits for the stock to move cannot turn a Monday-14:15 price into a Friday-priced option.
+    uint64 public constant MIN_CLEAR_GRACE = 5 minutes;
+    uint64 public constant MAX_CLEAR_GRACE = 4 hours;
     uint64 public constant MAX_WEEKEND_LATE = 2 hours; // weekend window never reaches Saturday (SPEC §5 (d))
     /// @dev Epoch-week offsets, seconds since Thursday 00:00 UTC (SPEC §5, D-046).
     uint64 public constant WEEK = 604_800;
@@ -80,7 +84,16 @@ contract AuctionHouse is IAuctionHouse, Ownable2Step, AccessControl, ReentrancyG
     // ───────────────────────────── parameters (timelock) ─────────────────────────────
 
     IPriceSource public priceSource;
+    /// @notice Once true, `setPriceSource` is disabled forever (audit G-1). `S_ref`, the strike and the reserve
+    /// bounds all derive from this source, so a re-pointable source turns an admin-key compromise into a total
+    /// loss of the next series' collateral (strike gridded off a fake `sRef`); frozen, the worst case stays the
+    /// T-14 bound. Set by the deploy's timelock batch right after the source is pointed at the SettlementOracle.
+    bool public priceSourceFrozen;
     uint64 public openTolerance = 7200; // SPEC §5 (a)
+    /// @notice `clear` after `auctionClose + clearGrace` takes the skip path (audit F-2). Bids cannot be
+    /// cancelled and depositors cannot exit during AUCTION, so an open-ended clearing window handed every
+    /// bidder a free option on the underlying's move for up to five days whenever the keeper was down.
+    uint64 public clearGrace = 1 hours;
     uint256 public maxBidsPerBidder = 8; // SPEC §8.1
     uint256 public minBidQty = 1e17; // SPEC §8.1: 0.1 option
 
@@ -133,6 +146,7 @@ contract AuctionHouse is IAuctionHouse, Ownable2Step, AccessControl, ReentrancyG
     error WrongOptionToken(address vault, address optionToken);
     error SeriesIdInUse(uint256 seriesId);
     error RenounceDisabled();
+    error PriceSourceFrozen();
 
     // ───────────────────────────── events (SPEC §16.1) ─────────────────────────────
 
@@ -427,7 +441,10 @@ contract AuctionHouse is IAuctionHouse, Ownable2Step, AccessControl, ReentrancyG
     {
         uint256 n = bs.length;
         uint256 remaining = Math.min(a.offeredQty, IERC4626(a.vault).totalAssets());
-        if (n == 0 || remaining == 0 || block.timestamp >= a.expiry) return (new uint256[](n), 0, 0, 0, true);
+        if (
+            n == 0 || remaining == 0 || block.timestamp >= a.expiry
+                || block.timestamp >= uint256(a.auctionClose) + clearGrace
+        ) return (new uint256[](n), 0, 0, 0, true);
 
         (uint256[] memory qty, uint256[] memory price, uint256[] memory idx) = _loadSorted(bs);
         cp = _clearingPrice(qty, price, idx, remaining);
@@ -698,6 +715,13 @@ contract AuctionHouse is IAuctionHouse, Ownable2Step, AccessControl, ReentrancyG
         openTolerance = seconds_;
     }
 
+    /// @notice How long after `auctionClose` a `clear` still fills (audit F-2); later clears skip.
+    function setClearGrace(uint64 seconds_) external onlyOwner {
+        if (seconds_ < MIN_CLEAR_GRACE || seconds_ > MAX_CLEAR_GRACE) revert OutOfBounds();
+        emit ParameterChanged(address(this), "clearGrace", clearGrace, seconds_);
+        clearGrace = seconds_;
+    }
+
     function setMaxBidsPerBidder(uint256 n) external onlyOwner {
         if (n == 0 || n > MAX_BIDS) revert OutOfBounds();
         emit ParameterChanged(address(this), "maxBidsPerBidder", maxBidsPerBidder, n);
@@ -710,13 +734,23 @@ contract AuctionHouse is IAuctionHouse, Ownable2Step, AccessControl, ReentrancyG
         minBidQty = qty;
     }
 
-    /// @notice Temporary until SettlementOracle implements `IPriceSource` (D-039, D-047).
+    /// @notice Re-points the price source until `freezePriceSource` (D-039, D-047, D-054; audit G-1).
     function setPriceSource(address source) external onlyOwner {
         if (source == address(0)) revert ZeroAddress();
+        if (priceSourceFrozen) revert PriceSourceFrozen();
         emit ParameterChanged(
             address(this), "priceSource", uint256(uint160(address(priceSource))), uint256(uint160(source))
         );
         priceSource = IPriceSource(source);
+    }
+
+    /// @notice One-way: disables `setPriceSource` forever. Refuses to freeze a placeholder (no code) so the deploy
+    /// cannot lock the contract onto `0xdEaD`. Switching `S_ref` to `referencePrice` (OQ-005) is a redeploy anyway.
+    function freezePriceSource() external onlyOwner {
+        if (priceSourceFrozen) revert PriceSourceFrozen();
+        if (address(priceSource).code.length == 0) revert Miswired("PRICE_SOURCE");
+        priceSourceFrozen = true;
+        emit ParameterChanged(address(this), "priceSourceFrozen", 0, 1);
     }
 
     /// @notice Grant or revoke `KEEPER_ROLE` (D-028). No account holds `DEFAULT_ADMIN_ROLE`; the owner is the admin.

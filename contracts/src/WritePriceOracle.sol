@@ -271,11 +271,19 @@ contract WritePriceOracle is Ownable2Step, IWritePriceOracle {
         secondsAgos[1] = 0;
 
         try IUniswapV3Pool(p).observe(secondsAgos) returns (int56[] memory tc, uint160[] memory spl) {
-            int24 tick = OracleMath.twapTick(tc[1] - tc[0], window);
-            if (tick < TickMath.MIN_TICK || tick > TickMath.MAX_TICK) return (0, "TICK_RANGE");
+            // Both cumulatives are designed to wrap (Uniswap v3 Oracle.sol), so the deltas are taken unchecked, as
+            // in SettlementOracle._observe: a checked underflow here would revert a view that must never revert.
+            int56 dTick;
+            uint160 splDelta;
+            unchecked {
+                dTick = tc[1] - tc[0];
+                splDelta = spl[1] - spl[0];
+            }
+            int56 t = OracleMath.twapTick56(dTick, window); // the floored value the cast would truncate (R-4)
+            if (t < TickMath.MIN_TICK || t > TickMath.MAX_TICK) return (0, "TICK_RANGE");
+            int24 tick = int24(t);
             uint160 sqrtP = TickMath.getSqrtRatioAtTick(tick);
 
-            uint160 splDelta = spl[1] - spl[0];
             if (splDelta == 0) return (0, "NO_LIQUIDITY");
             uint256 lAvg = OracleMath.harmonicLiquidity(window, splDelta);
             // `usdgIsToken0` and `writeIsToken1` are the same boolean for a two-token WRITE/USDG pool.

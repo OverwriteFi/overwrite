@@ -129,6 +129,40 @@ contract DeployLibTest is DeployHarness {
         this.validate(c);
     }
 
+    /// @notice Audit C-1: the 48 h / four-key shape is refused by `validate`, not merely written in the runbook.
+    function test_mainnetConfigRefusesWeakGovernance() public {
+        DeployConfig memory c = _filledMainnet();
+        this.validate(c); // the intended shape passes
+        c.gov.timelockMinDelay = 48 hours - 1;
+        vm.expectRevert(abi.encodeWithSelector(Config.MainnetGovernance.selector, "timelockMinDelay < 48h"));
+        this.validate(c);
+        c = _filledMainnet();
+        c.gov.deployerIsAdmin = true;
+        vm.expectRevert(abi.encodeWithSelector(Config.MainnetGovernance.selector, "deployerIsAdmin"));
+        this.validate(c);
+        c = _filledMainnet();
+        c.gov.guardians = new address[](1);
+        c.gov.guardians[0] = guardianHot;
+        vm.expectRevert(abi.encodeWithSelector(Config.MainnetGovernance.selector, "guardians != 2"));
+        this.validate(c);
+        c = _filledMainnet();
+        c.gov.keeper = guardianHot;
+        vm.expectRevert(
+            abi.encodeWithSelector(Config.MainnetGovernance.selector, "admin, keeper and guardians must be distinct")
+        );
+        this.validate(c);
+    }
+
+    function _filledMainnet() internal view returns (DeployConfig memory c) {
+        c = Config.read(MAINNET);
+        c.gov.admin = admin;
+        c.gov.keeper = keeper;
+        c.gov.treasury = treasury;
+        c.gov.guardians = new address[](2);
+        c.gov.guardians[0] = guardianHot;
+        c.gov.guardians[1] = guardianCold;
+    }
+
     /// @notice The mainnet config names real externals, so nothing on 4663 may be mocked.
     function test_mainnetConfigNamesRealExternals() public view {
         DeployConfig memory c = Config.read(MAINNET);
@@ -157,11 +191,11 @@ contract DeployLibTest is DeployHarness {
         vaults[0] = makeAddr("vault");
 
         (address[] memory targets,) = VaultDeployLib.batchA(c, k, vaults, _emptyHolders(), makeAddr("write"));
-        assertEq(targets.length, 17, "docs/RUNBOOK.md quotes 17 calls for the shipped 4663 config");
+        assertEq(targets.length, 19, "docs/RUNBOOK.md quotes 19 calls for the shipped 4663 config");
 
         // Without the token layer the five setWriteToken calls are not emitted.
         (address[] memory noToken,) = VaultDeployLib.batchA(c, k, vaults, _emptyHolders(), address(0));
-        assertEq(noToken.length, 12, "vault layer alone");
+        assertEq(noToken.length, 14, "vault layer alone");
     }
 
     // ───────────────────────────── the address book ─────────────────────────────

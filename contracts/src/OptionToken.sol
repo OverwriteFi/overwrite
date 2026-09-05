@@ -5,6 +5,7 @@ import {ERC1155} from "@openzeppelin/contracts/token/ERC1155/ERC1155.sol";
 import {ERC1155Supply} from "@openzeppelin/contracts/token/ERC1155/extensions/ERC1155Supply.sol";
 import {Ownable} from "@openzeppelin/contracts/access/Ownable.sol";
 import {Ownable2Step} from "@openzeppelin/contracts/access/Ownable2Step.sol";
+import {ReentrancyGuard} from "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
 import {IOptionToken} from "./interfaces/IOptionToken.sol";
 import {ICoveredCallVault} from "./interfaces/ICoveredCallVault.sol";
 import {SeriesKind} from "./Types.sol";
@@ -14,7 +15,7 @@ import {SeriesKind} from "./Types.sol";
 /// Ids are an incrementing counter; (vault, underlying, kind, strike, expiry) are stored per id.
 /// Only the registered vault of an underlying can create series and mint/burn its ids. Holders
 /// call `claim` after settlement; the token burns and asks the vault to pay out stock tokens.
-contract OptionToken is ERC1155Supply, Ownable2Step, IOptionToken {
+contract OptionToken is ERC1155Supply, Ownable2Step, ReentrancyGuard, IOptionToken {
     uint256 public nextSeriesId = 1;
     mapping(address underlying => address vault) public vaultOf;
     mapping(address vault => bool) public isVault;
@@ -29,6 +30,7 @@ contract OptionToken is ERC1155Supply, Ownable2Step, IOptionToken {
     error ZeroQty();
     error PayoutNotRaised(uint256 id);
     error RenounceDisabled();
+    error Miswired(bytes32 what);
 
     event VaultRegistered(address indexed underlying, address indexed vault);
     event SeriesCreated(
@@ -54,6 +56,9 @@ contract OptionToken is ERC1155Supply, Ownable2Step, IOptionToken {
     function registerVault(address underlying, address vault) external onlyOwner {
         if (underlying == address(0) || vault == address(0)) revert ZeroAddress();
         if (vaultOf[underlying] != address(0)) revert VaultAlreadyRegistered(underlying);
+        // Irreversible, so the pairing is asserted here rather than discovered at the first `create` (audit C-2).
+        if (address(ICoveredCallVault(vault).stock()) != underlying) revert Miswired("VAULT_STOCK");
+        if (address(ICoveredCallVault(vault).optionToken()) != address(this)) revert Miswired("VAULT_OPTION_TOKEN");
         vaultOf[underlying] = vault;
         isVault[vault] = true;
         emit VaultRegistered(underlying, vault);
@@ -129,7 +134,9 @@ contract OptionToken is ERC1155Supply, Ownable2Step, IOptionToken {
 
     /// @notice Burn `qty` options of a settled series and receive the stock-token payout (SPEC §9.7 step 4).
     /// No expiry on claims. Payout may be zero (OTM); the burn still happens.
-    function claim(uint256 id, uint256 qty, address to) external returns (uint256 tokens) {
+    /// @dev `nonReentrant` so the T-16 claim ("every state-changing external function") holds literally here and
+    /// not only through the vault's own guard (audit G-3).
+    function claim(uint256 id, uint256 qty, address to) external nonReentrant returns (uint256 tokens) {
         SeriesInfo storage s = _series[id];
         if (s.vault == address(0)) revert UnknownSeries(id);
         if (!s.settled) revert NotSettled(id);

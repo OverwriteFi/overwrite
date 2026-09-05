@@ -131,7 +131,7 @@ library VaultDeployLib {
         TokenDeployLib.Holders memory h,
         address write
     ) internal pure returns (address[] memory targets, bytes[] memory payloads) {
-        uint256 max = 6 + c.gov.guardians.length + 9 * vaults.length + (write == address(0) ? 0 : 5);
+        uint256 max = 8 + c.gov.guardians.length + 9 * vaults.length + (write == address(0) ? 0 : 5);
         targets = new address[](max);
         payloads = new bytes[](max);
         uint256 n;
@@ -161,6 +161,9 @@ library VaultDeployLib {
         (address(k.auctionHouse), abi.encodeCall(AuctionHouse.setPriceSource, (address(k.settlement))));
         (targets[n], payloads[n++]) =
         (address(k.capController), abi.encodeCall(CapController.setPriceSource, (address(k.settlement))));
+        // ... and frozen in the same batch (audit G-1): from here on `S_ref` / `S_cap` can only change by redeploy.
+        (targets[n], payloads[n++]) = (address(k.auctionHouse), abi.encodeCall(AuctionHouse.freezePriceSource, ()));
+        (targets[n], payloads[n++]) = (address(k.capController), abi.encodeCall(CapController.freezePriceSource, ()));
 
         if (write != address(0)) {
             n = _writeTokenCalls(h, write, targets, payloads, n);

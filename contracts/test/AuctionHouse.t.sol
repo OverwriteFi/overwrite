@@ -310,6 +310,42 @@ contract AuctionHouseTest is AuctionBaseTest {
         assertEq(ah.auctions(id).expiry, sun);
     }
 
+    /// @dev Audit F-2: a clear that arrives after `clearGrace` skips, so a bidder cannot wait for the stock to
+    /// move and then take an ITM option at Monday's price.
+    function test_clear_afterGraceSkips() public {
+        uint256 id = _open(DIST, RESERVE);
+        _bid(mm1, id, 100e18, RESERVE);
+        uint64 close = ah.auctions(id).auctionClose;
+        vm.warp(close + ah.clearGrace() - 1);
+        (,,, bool willSkip) = ah.previewClear(id);
+        assertFalse(willSkip, "inside the grace window the clear fills");
+        vm.warp(close + ah.clearGrace());
+        (,,, willSkip) = ah.previewClear(id);
+        assertTrue(willSkip, "at the deadline the clear skips");
+        (uint256 cp, uint256 filled,,) = ah.clear(id);
+        assertEq(cp, 0);
+        assertEq(filled, 0);
+        assertEq(uint8(ah.auctions(id).state), uint8(IAuctionHouse.AuctionState.SKIPPED));
+        assertEq(ah.refundable(mm1), 100e18 * RESERVE / 1e18, "escrow fully refundable");
+        assertEq(uint8(vault.state()), uint8(VaultState.IDLE));
+    }
+
+    function test_setClearGrace_bounds() public {
+        uint64 lo = ah.MIN_CLEAR_GRACE();
+        uint64 hi = ah.MAX_CLEAR_GRACE();
+        vm.startPrank(admin);
+        vm.expectRevert(AuctionHouse.OutOfBounds.selector);
+        ah.setClearGrace(lo - 1);
+        vm.expectRevert(AuctionHouse.OutOfBounds.selector);
+        ah.setClearGrace(hi + 1);
+        ah.setClearGrace(2 hours);
+        assertEq(ah.clearGrace(), 2 hours);
+        vm.stopPrank();
+        vm.prank(bob);
+        vm.expectRevert(abi.encodeWithSelector(Ownable.OwnableUnauthorizedAccount.selector, bob));
+        ah.setClearGrace(1 hours);
+    }
+
     // ───────────────────────────── bid ─────────────────────────────
 
     function test_bid_happy() public {
@@ -826,6 +862,19 @@ contract AuctionHouseTest is AuctionBaseTest {
         ah.setPriceSource(address(0));
         ah.setPriceSource(bob);
         assertEq(address(ah.priceSource()), bob);
+        // audit G-1: the freeze refuses a source without code, then disables the setter for good
+        vm.expectRevert(abi.encodeWithSelector(AuctionHouse.Miswired.selector, bytes32("PRICE_SOURCE")));
+        ah.freezePriceSource();
+        ah.setPriceSource(address(priceSource));
+        vm.expectEmit(true, false, false, true);
+        emit AuctionHouse.ParameterChanged(address(ah), "priceSourceFrozen", 0, 1);
+        ah.freezePriceSource();
+        assertTrue(ah.priceSourceFrozen());
+        vm.expectRevert(AuctionHouse.PriceSourceFrozen.selector);
+        ah.setPriceSource(bob);
+        vm.expectRevert(AuctionHouse.PriceSourceFrozen.selector);
+        ah.freezePriceSource();
+        assertEq(address(ah.priceSource()), address(priceSource), "still the frozen source");
 
         vm.expectRevert(AuctionHouse.ZeroAddress.selector);
         ah.setKeeper(address(0), true);
@@ -841,6 +890,8 @@ contract AuctionHouseTest is AuctionBaseTest {
         ah.setKeeper(bob, false);
         vm.expectRevert(abi.encodeWithSelector(Ownable.OwnableUnauthorizedAccount.selector, bob));
         ah.setPriceSource(bob);
+        vm.expectRevert(abi.encodeWithSelector(Ownable.OwnableUnauthorizedAccount.selector, bob));
+        ah.freezePriceSource();
         vm.stopPrank();
     }
 

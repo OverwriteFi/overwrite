@@ -9,6 +9,11 @@ import {Ownable2Step} from "@openzeppelin/contracts/access/Ownable2Step.sol";
 
 import {IBondManager} from "./interfaces/IBondManager.sol";
 
+/// @dev The one getter `setAuctionHouse` needs; kept local so this file imports no AuctionHouse code.
+interface IAuctionHouseBondWiring {
+    function bondManager() external view returns (address);
+}
+
 /// @title BondManager
 /// @notice Curator and market-maker bonds (SPEC §13, D-011, D-030). A bond is locked by participation:
 /// `AuctionHouse.bid` locks it on the bidder's first bid in a series and the AuctionHouse releases it at
@@ -219,6 +224,8 @@ contract BondManager is IBondManager, Ownable2Step, ReentrancyGuard {
     function setAuctionHouse(address auctionHouse_) external onlyOwner {
         if (auctionHouse_ == address(0)) revert ZeroAddress();
         if (auctionHouse != address(0)) revert AlreadySet();
+        // Outside deploy batch A nothing later re-asserts this pointer, and it can never be re-set (audit C-3).
+        if (IAuctionHouseBondWiring(auctionHouse_).bondManager() != address(this)) revert Miswired("AUCTION_HOUSE");
         auctionHouse = auctionHouse_;
         emit AuctionHouseSet(auctionHouse_);
     }

@@ -14,8 +14,30 @@ contract OptionTokenTest is BaseTest {
 
     function setUp() public override {
         super.setUp();
+        _wireFake(fakeVault, underlying2);
         vm.prank(admin);
         opt.registerVault(underlying2, fakeVault);
+    }
+
+    /// @dev `registerVault` asserts the pairing (audit C-2); a bare address must answer like a vault would.
+    function _wireFake(address v, address underlying) internal {
+        vm.mockCall(v, abi.encodeWithSignature("stock()"), abi.encode(underlying));
+        vm.mockCall(v, abi.encodeWithSignature("optionToken()"), abi.encode(address(opt)));
+    }
+
+    function test_registerVault_assertsPairing() public {
+        address v = makeAddr("mispaired");
+        address u = makeAddr("underlying3");
+        vm.mockCall(v, abi.encodeWithSignature("stock()"), abi.encode(makeAddr("someOtherStock")));
+        vm.mockCall(v, abi.encodeWithSignature("optionToken()"), abi.encode(address(opt)));
+        vm.prank(admin);
+        vm.expectRevert(abi.encodeWithSelector(OptionToken.Miswired.selector, bytes32("VAULT_STOCK")));
+        opt.registerVault(u, v);
+        vm.mockCall(v, abi.encodeWithSignature("stock()"), abi.encode(u));
+        vm.mockCall(v, abi.encodeWithSignature("optionToken()"), abi.encode(makeAddr("otherOptionToken")));
+        vm.prank(admin);
+        vm.expectRevert(abi.encodeWithSelector(OptionToken.Miswired.selector, bytes32("VAULT_OPTION_TOKEN")));
+        opt.registerVault(u, v);
     }
 
     function _createFake() internal returns (uint256 id) {

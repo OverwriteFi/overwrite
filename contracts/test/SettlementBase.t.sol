@@ -126,8 +126,22 @@ abstract contract SettlementBaseTest is AuctionBaseTest {
         _clear(id);
     }
 
-    function _hint(uint80 refId) internal pure returns (ISettlementOracle.Hint memory h) {
+    /// @dev Since audit R-1 the observation hint is verified on-chain, so the default hint is the one an honest
+    /// keeper would compute: the newest observation at or before the current series' expiry.
+    function _hint(uint80 refId) internal view returns (ISettlementOracle.Hint memory h) {
         h.refRoundId = refId;
+        h.obsIndex = _obsAtOrBefore(vault.series(vault.currentSeriesId()).expiry);
+    }
+
+    function _obsAtOrBefore(uint256 anchor) internal view returns (uint16) {
+        uint16 i = pool.observationIndex();
+        uint16 card = pool.observationCardinality();
+        for (uint256 k; k < card; ++k) {
+            (uint32 ts,,, bool init) = pool.observations(i);
+            if (init && ts <= anchor) return i;
+            i = i == 0 ? card - 1 : i - 1;
+        }
+        return 0;
     }
 
     /// @dev Posts a fresh round 1 h before expiry, warps to expiry and settles on path 1.

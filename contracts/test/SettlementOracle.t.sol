@@ -145,28 +145,33 @@ contract SettlementOracleTest is SettlementBaseTest {
     }
 
     function test_settle_gates() public {
+        ISettlementOracle.Hint memory h_1 = _hint(1);
         vm.expectRevert(abi.encodeWithSelector(SettlementOracle.UnknownSeries.selector, 99));
-        oracle.settle(99, _hint(1));
+        oracle.settle(99, h_1);
         _deposit(alice, DEPOSIT);
         uint256 id = _openDefault();
+        ISettlementOracle.Hint memory h_2 = _hint(1);
         vm.expectRevert(abi.encodeWithSelector(SettlementOracle.NotSettleable.selector, bytes32("NOT_LIVE")));
-        oracle.settle(id, _hint(1));
+        oracle.settle(id, h_2);
         _bid(mm1, id, 500e18, 2e6);
         _clear(id);
+        ISettlementOracle.Hint memory h_3 = _hint(1);
         vm.expectRevert(abi.encodeWithSelector(SettlementOracle.NotSettleable.selector, bytes32("NOT_EXPIRED")));
-        oracle.settle(id, _hint(1));
+        oracle.settle(id, h_3);
         uint64 e = vault.series(id).expiry;
         uint80 refId = _feedRoundAt(e - 1 hours, PRICE);
         vm.warp(e);
         vm.prank(admin);
         stock.setOraclePaused(true);
+        ISettlementOracle.Hint memory h_4 = _hint(refId);
         vm.expectRevert(abi.encodeWithSelector(SettlementOracle.NotSettleable.selector, bytes32("ORACLE_PAUSED")));
-        oracle.settle(id, _hint(refId));
+        oracle.settle(id, h_4);
         vm.prank(admin);
         stock.setOraclePaused(false);
         oracle.settle(id, _hint(refId));
+        ISettlementOracle.Hint memory h_5 = _hint(refId);
         vm.expectRevert(abi.encodeWithSelector(SettlementOracle.NotSettleable.selector, bytes32("NOT_LIVE")));
-        oracle.settle(id, _hint(refId));
+        oracle.settle(id, h_5);
     }
 
     function test_settle_refHint_mustBeLastBeforeExpiry() public {
@@ -176,14 +181,18 @@ contract SettlementOracleTest is SettlementBaseTest {
         uint80 r2 = _feedRoundAt(e - 1 hours, PRICE);
         uint80 r3 = _feedRoundAt(e + 1, PRICE);
         vm.warp(e + 1);
+        ISettlementOracle.Hint memory h_6 = _hint(r1);
         vm.expectRevert(abi.encodeWithSelector(SettlementOracle.BadRefRoundHint.selector, r1));
-        oracle.settle(id, _hint(r1));
+        oracle.settle(id, h_6);
+        ISettlementOracle.Hint memory h_7 = _hint(r3);
         vm.expectRevert(abi.encodeWithSelector(SettlementOracle.BadRefRoundHint.selector, r3));
-        oracle.settle(id, _hint(r3));
+        oracle.settle(id, h_7);
+        ISettlementOracle.Hint memory h_8 = _hint(12345);
         vm.expectRevert(abi.encodeWithSelector(SettlementOracle.BadRefRoundHint.selector, uint80(12345)));
-        oracle.settle(id, _hint(12345));
+        oracle.settle(id, h_8);
+        ISettlementOracle.Hint memory h_9 = _hint(0);
         vm.expectRevert(SettlementOracle.RefRoundRequired.selector);
-        oracle.settle(id, _hint(0));
+        oracle.settle(id, h_9);
         oracle.settle(id, _hint(r2));
         assertEq(oracle.records(id).roundId, r2);
     }
@@ -210,8 +219,9 @@ contract SettlementOracleTest is SettlementBaseTest {
         assertTrue(ok);
         assertEq(path, 1);
         uint80 later = _feedRoundAt(e - 30 minutes, PRICE);
+        ISettlementOracle.Hint memory h_10 = _hint(r);
         vm.expectRevert(abi.encodeWithSelector(SettlementOracle.BadRefRoundHint.selector, r));
-        oracle.settle(id, _hint(r));
+        oracle.settle(id, h_10);
         oracle.settle(id, _hint(later));
     }
 
@@ -232,8 +242,9 @@ contract SettlementOracleTest is SettlementBaseTest {
         uint80 last1 = _feedRoundAt(e - 2 hours, PRICE);
         uint80 first2 = _feedRoundAtPhase(2, 1, e - 1 hours, 205e8);
         vm.warp(e);
+        ISettlementOracle.Hint memory h_11 = _hint(last1);
         vm.expectRevert(abi.encodeWithSelector(SettlementOracle.BadRefRoundHint.selector, last1));
-        oracle.settle(id, _hint(last1));
+        oracle.settle(id, h_11);
         oracle.settle(id, _hint(first2));
         assertEq(vault.series(id).settlementPrice, 205e8);
     }
@@ -244,8 +255,9 @@ contract SettlementOracleTest is SettlementBaseTest {
         uint64 e = vault.series(id).expiry;
         uint80 bad = _feedRoundAt(e - 1 hours, 0);
         vm.warp(e);
+        ISettlementOracle.Hint memory h_12 = _hint(bad);
         vm.expectRevert(abi.encodeWithSelector(SettlementOracle.BadRefRoundHint.selector, bad));
-        oracle.settle(id, _hint(bad));
+        oracle.settle(id, h_12);
     }
 
     /// T-01: a round older than weekdayMaxStale is rejected on path 1 and the series falls to the TWAP.
@@ -288,10 +300,11 @@ contract SettlementOracleTest is SettlementBaseTest {
         vm.warp(e);
         // last round is Monday's: > 26 h old; no TWAP activity → both fail
         uint80 last = feed.roundId(1, nextAgg - 1);
+        ISettlementOracle.Hint memory hh_1 = _hint(last);
         vm.expectRevert(
             abi.encodeWithSelector(SettlementOracle.NoOraclePath.selector, bytes32("STALE"), bytes32("OBSERVATIONS"))
         );
-        oracle.settle(id, _hint(last));
+        oracle.settle(id, hh_1);
         (bool ok,,, bytes32 reason) = oracle.previewSettle(id, _hint(last));
         assertFalse(ok);
         assertEq(reason, bytes32("OBSERVATIONS"));
@@ -307,10 +320,11 @@ contract SettlementOracleTest is SettlementBaseTest {
         feed.setRound(feed.roundId(1, 1), int256(PRICE), e + 5);
         feed.setLatest(feed.roundId(1, 1));
         vm.warp(e + 5);
+        ISettlementOracle.Hint memory hh_2 = _hint(0);
         vm.expectRevert(
             abi.encodeWithSelector(SettlementOracle.NoOraclePath.selector, bytes32("NO_ROUND"), bytes32("OBSERVATIONS"))
         );
-        oracle.settle(id, _hint(0));
+        oracle.settle(id, hh_2);
     }
 
     // ═════════════════════════════ jump guard (D-025, D-051) ═════════════════════════════
@@ -324,12 +338,13 @@ contract SettlementOracleTest is SettlementBaseTest {
         (bool ok,,, bytes32 reason) = oracle.previewSettle(id, _hint(hi));
         assertFalse(ok);
         assertEq(reason, bytes32("OBSERVATIONS"));
+        ISettlementOracle.Hint memory hh_3 = _hint(hi);
         vm.expectRevert(
             abi.encodeWithSelector(
                 SettlementOracle.NoOraclePath.selector, bytes32("JUMP_GUARD"), bytes32("OBSERVATIONS")
             )
         );
-        oracle.settle(id, _hint(hi));
+        oracle.settle(id, hh_3);
         uint80 edge = _feedRoundAt(e - 1 hours, 260e8);
         oracle.settle(id, _hint(edge));
         assertEq(vault.series(id).settlementPrice, 260e8, "exactly +30 % passes");
@@ -340,12 +355,13 @@ contract SettlementOracleTest is SettlementBaseTest {
         uint64 e = vault.series(id).expiry;
         uint80 lo = _feedRoundAt(e - 1 hours, 140e8 - 1);
         vm.warp(e);
+        ISettlementOracle.Hint memory hh_4 = _hint(lo);
         vm.expectRevert(
             abi.encodeWithSelector(
                 SettlementOracle.NoOraclePath.selector, bytes32("JUMP_GUARD"), bytes32("OBSERVATIONS")
             )
         );
-        oracle.settle(id, _hint(lo));
+        oracle.settle(id, hh_4);
     }
 
     /// @dev The event fires when a later path succeeds after the guard tripped on path 1 (TWAP inside 3 % of the
@@ -418,6 +434,31 @@ contract SettlementOracleTest is SettlementBaseTest {
             abi.encodeWithSelector(SettlementOracle.NoOraclePath.selector, bytes32("GRACE"), bytes32("NO_ROUND"))
         );
         oracle.settle(id, h);
+    }
+
+    /// @dev Audit A-01: a pool whose cumulatives average outside the tick range must fail the path, not revert
+    /// `settle` from inside `TickMath.getSqrtRatioAtTick`, which sits outside the `observe` try/catch.
+    function test_path2_reason_OBSERVE_onOutOfRangeTick() public {
+        (uint256 id, ISettlementOracle.Hint memory h) = _weekendReady(TICK_200);
+        int56[] memory tcs = new int56[](2);
+        uint160[] memory spls = new uint160[](2);
+        tcs[1] = int56(uint56(TWAP_WINDOW_WEEKEND_())) * 1_000_000; // average tick 1e6 > MAX_TICK
+        spls[1] = 1;
+        vm.mockCall(
+            address(pool), abi.encodeWithSelector(bytes4(keccak256("observe(uint32[])"))), abi.encode(tcs, spls)
+        );
+        (bool ok,,, bytes32 reason) = oracle.previewSettle(id, h);
+        assertFalse(ok);
+        assertEq(reason, bytes32("NO_ROUND"));
+        vm.expectRevert(
+            abi.encodeWithSelector(SettlementOracle.NoOraclePath.selector, bytes32("OBSERVE"), bytes32("NO_ROUND"))
+        );
+        oracle.settle(id, h);
+        vm.clearMockedCalls();
+    }
+
+    function TWAP_WINDOW_WEEKEND_() internal view returns (uint32) {
+        return oracle.TWAP_WINDOW_WEEKEND();
     }
 
     function test_path2_reason_OBSERVE() public {
@@ -495,24 +536,67 @@ contract SettlementOracleTest is SettlementBaseTest {
         oracle.settle(id, h);
     }
 
-    /// D-053: a wrong observation hint can only make the TWAP path fail, never pass; the right one settles.
+    /// D-053 as amended by the audit (R-1): a wrong observation hint REVERTS like a wrong round hint, so nobody
+    /// can turn an under-count into a path change; the right one settles.
     function test_path2_observationHintCannotHelp() public {
         (uint256 id, ISettlementOracle.Hint memory h) = _weekendReady(TICK_200);
         uint16 good = h.obsIndex;
         pool.write(uint32(block.timestamp), TICK_200, POOL_LIQ); // a swap after expiry
-        h.obsIndex = pool.observationIndex(); // after the anchor: rejected
-        (bool ok,,, bytes32 reason) = oracle.previewSettle(id, h);
-        assertFalse(ok);
-        assertEq(reason, bytes32("NO_ROUND"));
-        h.obsIndex = good - 4; // the first swap of the window: only one observation counted from there
-        (ok,,,) = oracle.previewSettle(id, h);
-        assertFalse(ok);
+        uint16 head = pool.observationIndex();
+        h.obsIndex = head; // after the anchor: a wrong hint
+        vm.expectRevert(abi.encodeWithSelector(SettlementOracle.BadObsHint.selector, head));
+        oracle.previewSettle(id, h);
+        h.obsIndex = good - 4; // the first swap of the window: a newer one at or before the anchor exists
+        vm.expectRevert(abi.encodeWithSelector(SettlementOracle.BadObsHint.selector, good - 4));
+        oracle.previewSettle(id, h);
         h.obsIndex = 999; // uninitialised slot
-        (ok,,,) = oracle.previewSettle(id, h);
-        assertFalse(ok);
+        vm.expectRevert(abi.encodeWithSelector(SettlementOracle.BadObsHint.selector, uint16(999)));
+        oracle.previewSettle(id, h);
         h.obsIndex = good;
         oracle.settle(id, h);
         assertEq(vault.series(id).settlementPath, 2);
+    }
+
+    /// @dev Audit R-1, the attack this closes: a post-expiry Monday round exists, and a caller with the live head
+    /// as `obsIndex` must not be able to skip the TWAP and settle on path 3.
+    function test_T08_liveHeadHintCannotForcePath3() public {
+        (uint256 id, ISettlementOracle.Hint memory h) = _weekendReady(TICK_200);
+        pool.write(uint32(block.timestamp), TICK_200, POOL_LIQ); // a swap after expiry moves the head
+        h.afterRoundId = _feedRoundAt(block.timestamp - 30, 232e8); // the first Monday round, a higher price
+        uint16 head = pool.observationIndex();
+        uint16 good = h.obsIndex;
+        h.obsIndex = head;
+        vm.expectRevert(abi.encodeWithSelector(SettlementOracle.BadObsHint.selector, head));
+        oracle.settle(id, h);
+        h.obsIndex = good;
+        oracle.settle(id, h);
+        assertEq(vault.series(id).settlementPath, 2, "the TWAP wins whoever calls");
+    }
+
+    /// @dev Audit R-2: during a phase overlap only the newest phase's round anchors path 1.
+    function test_path1_phaseOverlapHasOneReference() public {
+        uint256 id = _liveWeekday();
+        uint64 e = vault.series(id).expiry;
+        uint80 oldPhase = _feedRoundAt(e - 2 hours, PRICE); // phase 1 keeps publishing
+        uint80 newPhase = _feedRoundAtPhase(2, 1, e - 1 hours, PRICE * 101 / 100);
+        vm.warp(e + 1);
+        ISettlementOracle.Hint memory h_13 = _hint(oldPhase);
+        vm.expectRevert(abi.encodeWithSelector(SettlementOracle.BadRefRoundHint.selector, oldPhase));
+        oracle.previewSettle(id, h_13);
+        oracle.settle(id, _hint(newPhase));
+        assertEq(vault.series(id).settlementPrice, uint128(PRICE * 101 / 100), "the newest phase is the reference");
+    }
+
+    /// @dev Audit R-5: an answer above uint128.max is garbage, never a reference and never a `resolveRef`.
+    function test_round_absurdAnswerIsInvalid() public {
+        uint256 id = _liveWeekday();
+        uint64 e = vault.series(id).expiry;
+        uint80 sane = _feedRoundAt(e - 2 hours, PRICE);
+        uint80 absurd = _feedRoundAt(e - 1 hours, uint256(type(uint128).max) + 1);
+        feed.setLatest(absurd);
+        vm.warp(e + 1);
+        oracle.settle(id, _hint(sane));
+        assertEq(vault.series(id).settlementPath, 1, "the absurd round is skipped like a non-positive one");
     }
 
     function test_path2_reason_USDG_STALE_and_OUT_OF_BAND() public {
@@ -735,16 +819,19 @@ contract SettlementOracleTest is SettlementBaseTest {
         uint80 refId = _feedRoundAt(e - 1 hours, PRICE);
         vm.warp(e);
         seqFeed.setRound(1, 1, e - 2 days, e - 2 days); // down
+        ISettlementOracle.Hint memory h_14 = _hint(refId);
         vm.expectRevert(abi.encodeWithSelector(SettlementOracle.NotSettleable.selector, bytes32("SEQUENCER_DOWN")));
-        oracle.settle(id, _hint(refId));
+        oracle.settle(id, h_14);
         seqFeed.setRound(2, 0, e - 100, e - 100); // up for 100 s < grace
+        ISettlementOracle.Hint memory h_15 = _hint(refId);
         vm.expectRevert(abi.encodeWithSelector(SettlementOracle.NotSettleable.selector, bytes32("SEQUENCER_DOWN")));
-        oracle.settle(id, _hint(refId));
+        oracle.settle(id, h_15);
         (bool ok, bytes32 reason) = oracle.canHalt(id, _hint(refId));
         assertFalse(ok);
         seqFeed.setDead(true);
+        ISettlementOracle.Hint memory h_16 = _hint(refId);
         vm.expectRevert(abi.encodeWithSelector(SettlementOracle.NotSettleable.selector, bytes32("SEQUENCER_DOWN")));
-        oracle.settle(id, _hint(refId));
+        oracle.settle(id, h_16);
         seqFeed.setDead(false);
         seqFeed.setRound(3, 0, e - 3600, e - 3600); // up for exactly the grace
         oracle.settle(id, _hint(refId));
@@ -772,8 +859,9 @@ contract SettlementOracleTest is SettlementBaseTest {
         (ok, reason) = oracle.canHalt(id, _hint(fresh));
         assertFalse(ok);
         assertEq(reason, bytes32("PATH_AVAILABLE"), "a fresh round means settle, not halt");
+        ISettlementOracle.Hint memory h_17 = _hint(fresh);
         vm.expectRevert(abi.encodeWithSelector(SettlementOracle.CannotHalt.selector, bytes32("PATH_AVAILABLE")));
-        oracle.halt(id, _hint(fresh));
+        oracle.halt(id, h_17);
         oracle.settle(id, _hint(fresh));
     }
 
@@ -799,10 +887,12 @@ contract SettlementOracleTest is SettlementBaseTest {
         assertTrue(rec.halted);
         assertEq(rec.resolveRef, 190e8, "resolveRef = refRound.answer (any age)");
         assertEq(rec.haltReason, bytes32("NO_ORACLE_PATH"));
+        ISettlementOracle.Hint memory h_18 = _hint(stale);
         vm.expectRevert(abi.encodeWithSelector(SettlementOracle.CannotHalt.selector, bytes32("NOT_LIVE")));
-        oracle.halt(id, _hint(stale));
+        oracle.halt(id, h_18);
+        ISettlementOracle.Hint memory h_19 = _hint(stale);
         vm.expectRevert(abi.encodeWithSelector(SettlementOracle.NotSettleable.selector, bytes32("NOT_LIVE")));
-        oracle.settle(id, _hint(stale));
+        oracle.settle(id, h_19);
     }
 
     function test_halt_weekday_jumpGuard() public {
@@ -828,6 +918,35 @@ contract SettlementOracleTest is SettlementBaseTest {
         vm.warp(e + 1801);
         oracle.halt(id, _hint(0));
         assertEq(oracle.records(id).resolveRef, PRICE, "sRef");
+    }
+
+    /// @dev Audit G-2: past the backstop a withheld hint may force the halt, but it must not move the band. The
+    /// Friday round exists on chain, so `resolveRef` is that round, not `sRef`, whatever the caller passes.
+    function test_halt_backstop_withheldHintDoesNotMoveResolveRef() public {
+        uint256 id = _liveWeekday();
+        uint64 e = vault.series(id).expiry;
+        uint256 friday = PRICE * 105 / 100;
+        uint80 refId = _feedRoundAt(e - 1 hours, friday);
+        feed.setLatest(refId);
+        vm.warp(e + 7 days);
+        (bool ok, bytes32 reason) = oracle.canHalt(id, _hint(0));
+        assertTrue(ok, "backstop: an unusable hint counts as no path");
+        assertEq(reason, bytes32("NO_ORACLE_PATH"));
+        oracle.halt(id, _hint(0));
+        assertEq(oracle.records(id).resolveRef, friday, "band centred on the Friday round, not on sRef");
+    }
+
+    /// @dev Audit G-2: a hint that is a valid pre-expiry round but not provably the last one still anchors the band.
+    function test_halt_backstop_nonLastHintStillAnchorsResolveRef() public {
+        uint256 id = _liveWeekday();
+        uint64 e = vault.series(id).expiry;
+        uint256 thursday = PRICE * 97 / 100;
+        uint80 thuId = _feedRoundAt(e - 26 hours, thursday);
+        uint80 friId = _feedRoundAt(e - 1 hours, PRICE * 103 / 100);
+        feed.setLatest(friId);
+        vm.warp(e + 7 days);
+        oracle.halt(id, _hint(thuId));
+        assertEq(oracle.records(id).resolveRef, thursday, "the hinted valid round anchors the band");
     }
 
     function test_halt_weekend_conditions() public {
@@ -1053,19 +1172,23 @@ contract SettlementOracleTest is SettlementBaseTest {
             _feedRoundAt(e - 2 hours + 60 * (i + 1), 0);
         }
         vm.warp(e + 1801);
+        ISettlementOracle.Hint memory h_20 = _hint(good);
         vm.expectRevert(abi.encodeWithSelector(SettlementOracle.BadRefRoundHint.selector, good));
-        oracle.settle(id, _hint(good));
+        oracle.settle(id, h_20);
+        ISettlementOracle.Hint memory h_21 = _hint(0);
         vm.expectRevert(SettlementOracle.RefRoundRequired.selector);
-        oracle.settle(id, _hint(0));
+        oracle.settle(id, h_21);
+        ISettlementOracle.Hint memory h_22 = _hint(0);
         vm.expectRevert(SettlementOracle.RefRoundRequired.selector);
-        oracle.canHalt(id, _hint(0)); // before the backstop an unusable hint is an error, not a halt
+        oracle.canHalt(id, h_22); // before the backstop an unusable hint is an error, not a halt
 
         vm.warp(e + 7 days);
         (bool ok, bytes32 reason) = oracle.canHalt(id, _hint(0));
         assertTrue(ok, "backstop: unverifiable hints count as no path");
         assertEq(reason, bytes32("NO_ORACLE_PATH"));
+        ISettlementOracle.Hint memory h_23 = _hint(0);
         vm.prank(bob);
-        oracle.halt(id, _hint(0));
+        oracle.halt(id, h_23);
         assertEq(oracle.records(id).resolveRef, PRICE, "resolveRef falls back to sRef");
         uint80 after_ = _feedRoundAt(e + 7 days, 205e8);
         vm.prank(bob);
@@ -1103,8 +1226,9 @@ contract SettlementOracleTest is SettlementBaseTest {
         assertFalse(canHalt, "a live path is never pre-empted");
         assertEq(reason, bytes32("PATH_AVAILABLE"));
         vm.prank(bob);
+        ISettlementOracle.Hint memory h_24 = _hint(r);
         vm.expectRevert(abi.encodeWithSelector(SettlementOracle.CannotHalt.selector, bytes32("PATH_AVAILABLE")));
-        oracle.halt(id, _hint(r));
+        oracle.halt(id, h_24);
         oracle.settle(id, _hint(r));
         assertEq(vault.series(id).settlementPrice, 230e8);
     }
@@ -1129,10 +1253,12 @@ contract SettlementOracleTest is SettlementBaseTest {
         uint80 good = _feedRoundAt(e - 1 hours, PRICE);
         feed.deleteRound(feed.roundId(1, 1)); // the registered first round becomes unreadable
         vm.warp(e + 1801);
+        ISettlementOracle.Hint memory h_25 = _hint(0);
         vm.expectRevert(SettlementOracle.RefRoundRequired.selector);
-        oracle.settle(id, _hint(0));
+        oracle.settle(id, h_25);
+        ISettlementOracle.Hint memory h_26 = _hint(0);
         vm.expectRevert(SettlementOracle.RefRoundRequired.selector);
-        oracle.halt(id, _hint(0));
+        oracle.halt(id, h_26);
         oracle.settle(id, _hint(good));
         assertEq(vault.series(id).settlementPath, 1);
     }
@@ -1147,8 +1273,9 @@ contract SettlementOracleTest is SettlementBaseTest {
         uint80 r = _feedRoundAt(e - 1 hours, PRICE);
         vm.warp(e);
         seqFeed.setRound(1, 0, block.timestamp + 1 days, block.timestamp);
+        ISettlementOracle.Hint memory h_27 = _hint(r);
         vm.expectRevert(abi.encodeWithSelector(SettlementOracle.NotSettleable.selector, bytes32("SEQUENCER_DOWN")));
-        oracle.settle(id, _hint(r));
+        oracle.settle(id, h_27);
         vm.warp(e + 7 days);
         seqFeed.setRound(2, 0, block.timestamp + 1 days, block.timestamp); // still reporting a future startedAt
         (bool ok, bytes32 reason) = oracle.canHalt(id, _hint(r));

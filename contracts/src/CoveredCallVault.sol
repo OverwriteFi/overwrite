@@ -141,6 +141,7 @@ contract CoveredCallVault is ERC4626, ReentrancyGuard, Ownable2Step, ICoveredCal
     error OutOfBounds();
     error NoShortfall(uint256 seriesId);
     error RenounceDisabled();
+    error RedeemQueueNotDrained(uint256 pending);
 
     // ───────────────────────────── events (SPEC §16.1) ─────────────────────────────
 
@@ -305,11 +306,16 @@ contract CoveredCallVault is ERC4626, ReentrancyGuard, Ownable2Step, ICoveredCal
 
     function withdraw(uint256 assets, address receiver, address owner) public override nonReentrant returns (uint256) {
         if (state != VaultState.IDLE) revert WithdrawalsClosed();
+        if (assets == 0) revert ZeroAmount();
         return super.withdraw(assets, receiver, owner);
     }
 
+    /// @dev After an issuer burn `totalAssets()` can saturate at zero while shares still exist; OZ would then burn
+    /// the shares for nothing. Refusing a zero-asset redeem keeps the shares alive for `injectCoverage` /
+    /// recovery instead of destroying them silently (audit N-1).
     function redeem(uint256 shares, address receiver, address owner) public override nonReentrant returns (uint256) {
         if (state != VaultState.IDLE) revert WithdrawalsClosed();
+        if (shares == 0 || previewRedeem(shares) == 0) revert ZeroAmount();
         return super.redeem(shares, receiver, owner);
     }
 
@@ -349,12 +355,17 @@ contract CoveredCallVault is ERC4626, ReentrancyGuard, Ownable2Step, ICoveredCal
     }
 
     /// @notice Always callable, including while paused, halted or sunset (SPEC §4.2, §15).
+    /// @dev Capped at the vault's USDG balance (audit R-3): a balance split re-floors two debts, so Σ credits can
+    /// drift above the balance by a unit per transfer and the last claimant would otherwise revert. The
+    /// remainder stays credited, as in `SafetyModule.claimRewards`.
     function claimPremium(address to) external nonReentrant returns (uint256 amount) {
         if (to == address(0)) revert ZeroAddress();
         _settlePremium(msg.sender);
         amount = _premiumClaimable[msg.sender];
+        uint256 bal = usdg.balanceOf(address(this));
+        if (amount > bal) amount = bal;
         if (amount == 0) revert NothingToClaim();
-        _premiumClaimable[msg.sender] = 0;
+        _premiumClaimable[msg.sender] -= amount;
         usdg.safeTransfer(to, amount);
         emit PremiumClaimed(msg.sender, to, amount);
     }
@@ -528,12 +539,19 @@ contract CoveredCallVault is ERC4626, ReentrancyGuard, Ownable2Step, ICoveredCal
         // past value must not block the vault.
         uint256 effectiveAt = stock.effectiveAt();
         if (effectiveAt > block.timestamp && effectiveAt <= expiry) return (false, "MULTIPLIER_CHANGE");
+        // Audit F-1: `openSeries` drains the redeem queue first and refuses to open while anything is still
+        // QUEUED, so more entries than one call can visit must be processed (permissionless) before opening.
+        // `requestRedeem` reverts in IDLE, so the queue can only shrink here and this can never be griefed.
+        if (_redeemQueue.length - redeemQueueHead > maxQueueOpsPerOpen) return (false, "REDEEM_QUEUE");
         return (true, bytes32(0));
     }
 
     /// @inheritdoc ICoveredCallVault
-    /// @dev IDLE → AUCTION. Executes queued deposits first (D-032), then offers 100 % of the unencumbered
-    /// balance net of queued redeems (D-009).
+    /// @dev IDLE → AUCTION. Executes every queued redeem at the current (post-settlement) share price and then
+    /// the queued deposits (D-032), so the offer is 100 % of the balance of shares that are actually staying
+    /// (D-009). A redeem request that merely reduced `offeredQty` would still sit inside the pooled NAV and
+    /// bear the next series' payout without earning its premium (audit F-1): excluding it from the offer does
+    /// not exclude it from the loss. Draining first is what SPEC §4.3 promises; the queue cannot grow in IDLE.
     function openSeries(SeriesKind kind, uint128 strike, uint64 expiry)
         external
         onlyAuctionHouse
@@ -543,9 +561,12 @@ contract CoveredCallVault is ERC4626, ReentrancyGuard, Ownable2Step, ICoveredCal
         (bool ok, bytes32 reason) = canOpenAuction(expiry);
         if (!ok) revert CannotOpen(reason);
         if (strike == 0) revert ZeroStrike();
+        _processRedeems(maxQueueOpsPerOpen);
+        uint256 left = _redeemQueue.length - redeemQueueHead;
+        if (left != 0) revert RedeemQueueNotDrained(left);
         _processDeposits(maxQueueOpsPerOpen);
         uint256 ta = totalAssets();
-        uint256 pending = pendingRedeemAssets();
+        uint256 pending = pendingRedeemAssets(); // zero after the drain; kept as the D-009 belt-and-braces
         offeredQty = ta > pending ? ta - pending : 0;
         if (offeredQty == 0) revert NothingToOffer();
         uint256 multiplier = stock.uiMultiplier();

@@ -208,6 +208,7 @@ contract VaultHandler is Test {
         uint256 max = vault.maxRedeem(a);
         if (max == 0) return;
         shares = bound(shares, 1, max);
+        if (vault.previewRedeem(shares) == 0) return; // audit N-1: refused on purpose
         vm.prank(a);
         vault.redeem(shares, a, a);
     }

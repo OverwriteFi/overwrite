@@ -139,6 +139,39 @@ contract SafetyModuleTest is TokenBaseTest {
         assertEq(write.balanceOf(staker1), assets);
     }
 
+    /// @dev I-21: the last staker out takes every wei of principal, even after a slash left floor-rounding dust.
+    function test_unstake_lastLeaverTakesAllPrincipal() public {
+        _fund(staker1, 1_000e18 + 7);
+        vm.prank(admin);
+        sm.slash(300e18 + 1, treasury, "ipfs://evidence");
+        uint256 all = sm.sharesOf(staker1);
+        vm.prank(staker1);
+        sm.requestUnstake(all);
+        _warpWithOracles(14 days);
+        vm.prank(staker1);
+        uint256 got = sm.unstake();
+        assertEq(got, 700e18 + 6);
+        assertEq(sm.totalStaked(), 0);
+        assertEq(sm.totalShares(), 0);
+    }
+
+    /// @dev I-21, the other direction: a near-total exit after a slash must leave principal behind the shares that
+    /// stay (the virtual +1 asset would otherwise round the leaver up to everything; found by the deep campaign).
+    function test_unstake_nearTotalExitLeavesPrincipalForRemainingShares() public {
+        _fund(staker1, 100e18);
+        vm.prank(admin);
+        sm.slash(18_668_275_900_004_683_045, treasury, "ipfs://evidence");
+        uint256 all = sm.sharesOf(staker1);
+        vm.prank(staker1);
+        sm.requestUnstake(all - 1);
+        _warpWithOracles(14 days);
+        vm.prank(staker1);
+        uint256 got = sm.unstake();
+        assertEq(sm.totalShares(), 1);
+        assertGt(sm.totalStaked(), 0, "the remaining share is not worthless");
+        assertEq(got + sm.totalStaked(), 100e18 - 18_668_275_900_004_683_045, "principal conserved");
+    }
+
     function test_unstake_revertsWithoutRequest() public {
         _fund(staker1, 1_000e18);
         vm.prank(staker1);

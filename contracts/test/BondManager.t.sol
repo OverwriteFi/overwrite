@@ -25,6 +25,7 @@ contract BondManagerTest is Test {
     function setUp() public {
         usdg = new MockUSDG();
         bm = new BondManager(address(usdg), admin, treasury);
+        vm.mockCall(ah, abi.encodeWithSignature("bondManager()"), abi.encode(address(bm))); // C-3 back-pointer
         vm.prank(admin);
         bm.setAuctionHouse(ah);
         usdg.mint(mm, 1_000_000e6);
@@ -52,6 +53,15 @@ contract BondManagerTest is Test {
         new BondManager(address(0), admin, treasury);
         vm.expectRevert(BondManager.ZeroAddress.selector);
         new BondManager(address(usdg), admin, address(0));
+    }
+
+    function test_setAuctionHouse_assertsBackPointer() public {
+        BondManager fresh = new BondManager(address(usdg), admin, treasury);
+        address wrong = makeAddr("wrongAuctionHouse");
+        vm.mockCall(wrong, abi.encodeWithSignature("bondManager()"), abi.encode(address(bm)));
+        vm.prank(admin);
+        vm.expectRevert(abi.encodeWithSelector(BondManager.Miswired.selector, bytes32("AUCTION_HOUSE")));
+        fresh.setAuctionHouse(wrong);
     }
 
     function test_setAuctionHouse_onceOnly() public {
