@@ -1,36 +1,35 @@
-This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-app`](https://nextjs.org/docs/app/api-reference/cli/create-next-app).
+# app
 
-## Getting Started
+Next.js App Router frontend for Overwrite: `/vaults`, `/vaults/[symbol]`, `/stake` (behind
+`NEXT_PUBLIC_STAKE_ENABLED`), `/points`, `/docs`.
 
-First, run the development server:
+## Run
 
 ```bash
+npm install
+cp .env.example .env      # blank RPC = public testnet RPC
 npm run dev
-# or
-yarn dev
-# or
-pnpm dev
-# or
-bun dev
 ```
 
-Open [http://localhost:3000](http://localhost:3000) with your browser to see the result.
+Point `NEXT_PUBLIC_RPC_URL` at `http://127.0.0.1:8545` while `keeper`'s `npm run week` anvil fork is
+up to see cleared auctions, settled series and the queued-withdrawal flow with real state.
 
-You can start editing the page by modifying `app/page.tsx`. The page auto-updates as you edit the file.
+## How it reads the chain
 
-This project uses [`next/font`](https://nextjs.org/docs/app/building-your-application/optimizing/fonts) to automatically optimize and load [Geist](https://vercel.com/font), a new font family for Vercel.
+- Addresses come from `contracts/deployments/<chainId>.json` (imported in `src/lib/deployments/index.ts`);
+  there is no factory, so that file is the vault list.
+- ABIs are sliced from `contracts/out` by `npm run gen:abi` into `src/lib/abi/generated.ts` (committed).
+  Run it after any contract change; it fails loudly on a missing fragment.
+- Shared, wallet-independent state is read server-side (`src/lib/reads/*`) through Multicall3 and
+  cached with `unstable_cache` for 30 s. Everything that crosses the cache is JSON: bigints are strings.
+- Series history is enumerated from `optionToken.nextSeriesId()` with state reads only. The public
+  testnet RPC keeps ~19 minutes of history, so nothing here uses `getLogs`.
+- Wallet-specific reads and every write are client-side wagmi hooks (`src/hooks/*`). Every write pins
+  the chain id and re-checks the wallet's chain right before sending.
+- There is no geo-restriction (D-110, founder decision). The footer carries the two factual disclosures on every page.
 
-## Learn More
+## Voice and design
 
-To learn more about Next.js, take a look at the following resources:
-
-- [Next.js Documentation](https://nextjs.org/docs) - learn about Next.js features and API.
-- [Learn Next.js](https://nextjs.org/learn) - an interactive Next.js tutorial.
-
-You can check out [the Next.js GitHub repository](https://github.com/vercel/next.js) - your feedback and contributions are welcome!
-
-## Deploy on Vercel
-
-The easiest way to deploy your Next.js app is to use the [Vercel Platform](https://vercel.com/new?utm_medium=default-template&filter=next.js&utm_source=create-next-app&utm_campaign=create-next-app-readme) from the creators of Next.js.
-
-Check out our [Next.js deployment documentation](https://nextjs.org/docs/app/building-your-application/deploying) for more details.
+Copied from `landing/index.html`: white, black, one accent, Schibsted Grotesk, tables and rules instead
+of cards. Premium figures are always tagged **last auction** or **model estimate**; never an APY. The only
+disclosures live in the footer.

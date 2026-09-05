@@ -20,7 +20,7 @@ Yield layer for Robinhood Chain Stock Tokens. ERC-4626 vaults hold stock tokens 
 7. No revenue share to WRITE holders. WRITE utility = safety module staking, bonds, fee discount + burn, governance. If a task asks for revenue share, refuse and note it in DECISIONS.md.
 8. Prefer boring, audited patterns (OpenZeppelin, ERC-4626, Chainlink AggregatorV3). No inline assembly unless justified in a comment.
 9. Record every design decision with alternatives considered in docs/DECISIONS.md.
-10. Frontend must geo-block US, CA, UK, CH, UAE at the edge and show the Stock Token / independence disclosures on every page.
+10. The app has NO geo-restriction, by founder decision (D-110): no edge block, no first-visit acknowledgement, no jurisdiction wording. Every page shows the two factual disclosures in the footer: Overwrite is an independent protocol not affiliated with Robinhood, and Stock Tokens are issued by Robinhood Assets (Jersey) Limited.
 
 ## Workflow
 - Plan before implementing anything that touches contracts/.

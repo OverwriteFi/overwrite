@@ -1767,3 +1767,30 @@ revision. Note the two ends of the same problem meet here: 300 bps is the *floor
 headroom below, and at that distance the contract's 10 bps reserve floor is above the model price for any
 plausible ETF volatility — see D-107's `coverRatio`. Both point at the same conclusion, that the
 placeholder curator parameters for ETFs need tuning before an ETF vault can clear.
+
+---
+
+## D-110 · 2026-09-05 · The app has no geo-restriction
+
+**Decision.** The frontend ships with open access. There is no edge geo-block, no first-visit
+acknowledgement, and no jurisdiction wording anywhere in the app. The footer keeps two factual lines on
+every page: Overwrite is an independent protocol not affiliated with, operated by, or endorsed by
+Robinhood; Stock Tokens are tokenised debt securities issued by Robinhood Assets (Jersey) Limited that
+confer no ownership or shareholder rights. CLAUDE.md rule 10 is rewritten to say so. Founder decision.
+
+**Why.** The protocol is a set of immutable contracts on a public chain that anyone can call directly; a
+country header check on the website restricts the website, not the protocol, and would misdescribe what
+the app can and cannot do. The two remaining footer lines are statements of fact about who built what,
+which stay true regardless of where the reader is.
+
+**Alternatives considered.** *Edge block on the hosting platform's country header* (the previous rule 10,
+implemented and then removed in the same day) — trivially bypassed, adds a false sense of control, and
+silently breaks for any host that does not set the header. *A first-visit acknowledgement banner* — same
+objection, plus friction on every device. *Keeping the "not available to US persons" sentence without
+enforcement* — a claim the app does not back up.
+
+**Consequences.** `app/src/proxy.ts` and `app/src/app/restricted/` are deleted; the footer's second
+paragraph is gone; the docs Terms paragraph no longer mentions jurisdictions. TOKENOMICS.md open item 3
+(geo-gating the points claim) inherits this decision: the claim page, when it exists, is not gated
+either. Any future restriction is a new decision, not a revert of this one.
+
