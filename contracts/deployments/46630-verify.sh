@@ -13,34 +13,34 @@ LIBS=src/libraries/TickMath.sol:TickMath:0x80AbE3b669ecF49FA57883661A4c4F94E79B7
 forge verify-contract 0x80AbE3b669ecF49FA57883661A4c4F94E79B79e7 src/libraries/TickMath.sol:TickMath --chain-id "$CHAIN" --verifier "$VERIFIER" --verifier-url "$VERIFIER_URL" --libraries "$LIBS" --guess-constructor-args --watch
 
 # TimelockController
-forge verify-contract 0x7055b20A990dF9e9724a9e0Fe20e8Ab91baA0899 lib/openzeppelin-contracts/contracts/governance/TimelockController.sol:TimelockController --chain-id "$CHAIN" --verifier "$VERIFIER" --verifier-url "$VERIFIER_URL" --libraries "$LIBS" --guess-constructor-args --watch
+forge verify-contract 0x183CD3640c5Cf5886F09117c7cF9B844782e9E8C lib/openzeppelin-contracts/contracts/governance/TimelockController.sol:TimelockController --chain-id "$CHAIN" --verifier "$VERIFIER" --verifier-url "$VERIFIER_URL" --libraries "$LIBS" --guess-constructor-args --watch
 
 # RiskModule
-forge verify-contract 0x8fc5FF8Ee10E8081ee6D1b0b9BA873149Aaaf007 src/RiskModule.sol:RiskModule --chain-id "$CHAIN" --verifier "$VERIFIER" --verifier-url "$VERIFIER_URL" --libraries "$LIBS" --guess-constructor-args --watch
+forge verify-contract 0x23580d6EB623Ad8108512e6ea27ae3852F295740 src/RiskModule.sol:RiskModule --chain-id "$CHAIN" --verifier "$VERIFIER" --verifier-url "$VERIFIER_URL" --libraries "$LIBS" --guess-constructor-args --watch
 
 # OptionToken
-forge verify-contract 0x3F6a1E5f16b66354fd56C8AAA5b25927bEA6aAfC src/OptionToken.sol:OptionToken --chain-id "$CHAIN" --verifier "$VERIFIER" --verifier-url "$VERIFIER_URL" --libraries "$LIBS" --guess-constructor-args --watch
+forge verify-contract 0x56009D85b2318A3B3aDbE5764f602C0F26555eA6 src/OptionToken.sol:OptionToken --chain-id "$CHAIN" --verifier "$VERIFIER" --verifier-url "$VERIFIER_URL" --libraries "$LIBS" --guess-constructor-args --watch
 
 # BondManager
-forge verify-contract 0x056E0Def113493512060ed28F5e5AD7cb04A4c6C src/BondManager.sol:BondManager --chain-id "$CHAIN" --verifier "$VERIFIER" --verifier-url "$VERIFIER_URL" --libraries "$LIBS" --guess-constructor-args --watch
+forge verify-contract 0x920F79DF191899934a04269B2280B2A1B2391266 src/BondManager.sol:BondManager --chain-id "$CHAIN" --verifier "$VERIFIER" --verifier-url "$VERIFIER_URL" --libraries "$LIBS" --guess-constructor-args --watch
 
 # FeeRouter
-forge verify-contract 0x8c7E78F20EE71B7B9d674ee30CC39618c8E10333 src/FeeRouter.sol:FeeRouter --chain-id "$CHAIN" --verifier "$VERIFIER" --verifier-url "$VERIFIER_URL" --libraries "$LIBS" --guess-constructor-args --watch
+forge verify-contract 0xCb3FaaD6515DF255Bc080194Eb32dA357B12775b src/FeeRouter.sol:FeeRouter --chain-id "$CHAIN" --verifier "$VERIFIER" --verifier-url "$VERIFIER_URL" --libraries "$LIBS" --guess-constructor-args --watch
 
 # AuctionHouse
-forge verify-contract 0x2Ab9fe15E0E98067a18d804347C7b13E36503A95 src/AuctionHouse.sol:AuctionHouse --chain-id "$CHAIN" --verifier "$VERIFIER" --verifier-url "$VERIFIER_URL" --libraries "$LIBS" --guess-constructor-args --watch
+forge verify-contract 0xEFE287cE0761813e642B6df5D6A08637E97E9B93 src/AuctionHouse.sol:AuctionHouse --chain-id "$CHAIN" --verifier "$VERIFIER" --verifier-url "$VERIFIER_URL" --libraries "$LIBS" --guess-constructor-args --watch
 
 # CapController
-forge verify-contract 0x6CBb14A22a1Bd3C3FA1017d757c079D274118f81 src/CapController.sol:CapController --chain-id "$CHAIN" --verifier "$VERIFIER" --verifier-url "$VERIFIER_URL" --libraries "$LIBS" --guess-constructor-args --watch
+forge verify-contract 0xf0BeEf79C7c9AbaA07a4B18e709F613516Db0034 src/CapController.sol:CapController --chain-id "$CHAIN" --verifier "$VERIFIER" --verifier-url "$VERIFIER_URL" --libraries "$LIBS" --guess-constructor-args --watch
 
 # SettlementOracle
-forge verify-contract 0xba214c8463F5C874c7851DCb09b01A0b2319E108 src/SettlementOracle.sol:SettlementOracle --chain-id "$CHAIN" --verifier "$VERIFIER" --verifier-url "$VERIFIER_URL" --libraries "$LIBS" --guess-constructor-args --watch
+forge verify-contract 0xc4b9C798d552105e2cE72EE6b286C0740AA1E4d1 src/SettlementOracle.sol:SettlementOracle --chain-id "$CHAIN" --verifier "$VERIFIER" --verifier-url "$VERIFIER_URL" --libraries "$LIBS" --guess-constructor-args --watch
 
 # CoveredCallVault (NVDA)
-forge verify-contract 0xe2029A8BDF6f559E50160Eb59f1E4B4Fc7A011C5 src/CoveredCallVault.sol:CoveredCallVault --chain-id "$CHAIN" --verifier "$VERIFIER" --verifier-url "$VERIFIER_URL" --libraries "$LIBS" --guess-constructor-args --watch
+forge verify-contract 0x7d873a335aD3cf8cc5A7AfEe8fA80b2d042b54E0 src/CoveredCallVault.sol:CoveredCallVault --chain-id "$CHAIN" --verifier "$VERIFIER" --verifier-url "$VERIFIER_URL" --libraries "$LIBS" --guess-constructor-args --watch
 
 # CoveredCallVault (SPY)
-forge verify-contract 0xbAB66DC34052479eF7a97e213DA8a9948ff772E3 src/CoveredCallVault.sol:CoveredCallVault --chain-id "$CHAIN" --verifier "$VERIFIER" --verifier-url "$VERIFIER_URL" --libraries "$LIBS" --guess-constructor-args --watch
+forge verify-contract 0x7b242611B7C490BC5F571095ef511d60E89bf914 src/CoveredCallVault.sol:CoveredCallVault --chain-id "$CHAIN" --verifier "$VERIFIER" --verifier-url "$VERIFIER_URL" --libraries "$LIBS" --guess-constructor-args --watch
 
 # MockStockToken (NVDA)
 forge verify-contract 0xc2D152ebE42be2c65d86c50b410231e5271634fb src/mocks/MockStockToken.sol:MockStockToken --chain-id "$CHAIN" --verifier "$VERIFIER" --verifier-url "$VERIFIER_URL" --libraries "$LIBS" --guess-constructor-args --watch
@@ -67,26 +67,26 @@ forge verify-contract 0x640c46710A5C075292655e8602EC1D4BA844A930 src/mocks/MockU
 forge verify-contract 0x2C51f2f94BBd847DF1Bb9cb82669B538Cbd96FDe src/mocks/MockAggregatorV3.sol:MockAggregatorV3 --chain-id "$CHAIN" --verifier "$VERIFIER" --verifier-url "$VERIFIER_URL" --libraries "$LIBS" --guess-constructor-args --watch
 
 # WRITE
-forge verify-contract 0x0B3D6678024Cf5063f8C0fcfe3e39354d38E71CA src/WRITE.sol:WRITE --chain-id "$CHAIN" --verifier "$VERIFIER" --verifier-url "$VERIFIER_URL" --libraries "$LIBS" --guess-constructor-args --watch
+forge verify-contract 0x0651AE06f048580562571fFB7CABf49Ae06010B8 src/WRITE.sol:WRITE --chain-id "$CHAIN" --verifier "$VERIFIER" --verifier-url "$VERIFIER_URL" --libraries "$LIBS" --guess-constructor-args --watch
 
 # LiquidityEscrow
-forge verify-contract 0x5e0B4E64d1CA5718C169fB59c27BA7fA62D2F671 src/LiquidityEscrow.sol:LiquidityEscrow --chain-id "$CHAIN" --verifier "$VERIFIER" --verifier-url "$VERIFIER_URL" --libraries "$LIBS" --guess-constructor-args --watch
+forge verify-contract 0xC628235207277D0fc9404830e8131021EbD307Fa src/LiquidityEscrow.sol:LiquidityEscrow --chain-id "$CHAIN" --verifier "$VERIFIER" --verifier-url "$VERIFIER_URL" --libraries "$LIBS" --guess-constructor-args --watch
 
 # EmissionsController
-forge verify-contract 0x8C3Ff7AA63b3b688B50bDc50c3C60A88a3274a31 src/EmissionsController.sol:EmissionsController --chain-id "$CHAIN" --verifier "$VERIFIER" --verifier-url "$VERIFIER_URL" --libraries "$LIBS" --guess-constructor-args --watch
+forge verify-contract 0x7d6d98c4dcc35c11916C34D5d63D82FC3796B4Ea src/EmissionsController.sol:EmissionsController --chain-id "$CHAIN" --verifier "$VERIFIER" --verifier-url "$VERIFIER_URL" --libraries "$LIBS" --guess-constructor-args --watch
 
 # Vesting (treasury)
-forge verify-contract 0x27D0bC570243D6B0357C96dd2d6e1F64ad95F69D src/Vesting.sol:Vesting --chain-id "$CHAIN" --verifier "$VERIFIER" --verifier-url "$VERIFIER_URL" --libraries "$LIBS" --guess-constructor-args --watch
+forge verify-contract 0xD9D4bD50f1736eE0564D80d2e3A7eEF0043270bf src/Vesting.sol:Vesting --chain-id "$CHAIN" --verifier "$VERIFIER" --verifier-url "$VERIFIER_URL" --libraries "$LIBS" --guess-constructor-args --watch
 
 # Vesting (team)
-forge verify-contract 0xa0abaa4eC77a42ceaaB065a0de2bD93dD44e5273 src/Vesting.sol:Vesting --chain-id "$CHAIN" --verifier "$VERIFIER" --verifier-url "$VERIFIER_URL" --libraries "$LIBS" --guess-constructor-args --watch
+forge verify-contract 0x912d806F9f4978Bd96BA39B242365f1A561A8193 src/Vesting.sol:Vesting --chain-id "$CHAIN" --verifier "$VERIFIER" --verifier-url "$VERIFIER_URL" --libraries "$LIBS" --guess-constructor-args --watch
 
 # PointsDistributor
-forge verify-contract 0xae2E4F198fc8c29e91422E197Ffd0217Ad679712 src/PointsDistributor.sol:PointsDistributor --chain-id "$CHAIN" --verifier "$VERIFIER" --verifier-url "$VERIFIER_URL" --libraries "$LIBS" --guess-constructor-args --watch
+forge verify-contract 0x03580256D92367C39d816fC38686DD91ccFA6b66 src/PointsDistributor.sol:PointsDistributor --chain-id "$CHAIN" --verifier "$VERIFIER" --verifier-url "$VERIFIER_URL" --libraries "$LIBS" --guess-constructor-args --watch
 
 # WritePriceOracle
-forge verify-contract 0xfEca213236d5e21b8d38A083D4bf6694C0a970b7 src/WritePriceOracle.sol:WritePriceOracle --chain-id "$CHAIN" --verifier "$VERIFIER" --verifier-url "$VERIFIER_URL" --libraries "$LIBS" --guess-constructor-args --watch
+forge verify-contract 0xaE21883c2401D0eb721995D2eEb48dd72FD45891 src/WritePriceOracle.sol:WritePriceOracle --chain-id "$CHAIN" --verifier "$VERIFIER" --verifier-url "$VERIFIER_URL" --libraries "$LIBS" --guess-constructor-args --watch
 
 # SafetyModule
-forge verify-contract 0xa7f27067858593C5D87C60C9407F726fc2b48e05 src/SafetyModule.sol:SafetyModule --chain-id "$CHAIN" --verifier "$VERIFIER" --verifier-url "$VERIFIER_URL" --libraries "$LIBS" --guess-constructor-args --watch
+forge verify-contract 0x37DEC60be0cd81ad9c9a5f5082A81d27779d3Ba1 src/SafetyModule.sol:SafetyModule --chain-id "$CHAIN" --verifier "$VERIFIER" --verifier-url "$VERIFIER_URL" --libraries "$LIBS" --guess-constructor-args --watch
 
