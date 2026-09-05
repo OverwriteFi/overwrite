@@ -1794,3 +1794,34 @@ paragraph is gone; the docs Terms paragraph no longer mentions jurisdictions. TO
 (geo-gating the points claim) inherits this decision: the claim page, when it exists, is not gated
 either. Any future restriction is a new decision, not a revert of this one.
 
+
+## D-111 · 2026-09-05 · The landing waitlist lives in Supabase, with a file fallback
+
+**Decision.** "Get in line" on `/` posts to `app/src/app/api/waitlist/route.ts`, which writes to a
+Supabase table `waitlist(contact unique, kind, source, created_at)` (`app/supabase/waitlist.sql`)
+through PostgREST with the service-role key, server-side only, RLS on and no anon policies. When
+`SUPABASE_URL` is unset the route appends to `app/.data/waitlist.jsonl` instead.
+
+**Alternatives.** Vercel KV / Upstash Redis (ties the list to one host and its marketplace billing);
+a flat file only (lost on every deploy). Supabase is free at this size, host-independent and exports CSV.
+
+**Consequences.** Two server-only env vars. The confirmation text promises exactly one message, the
+first auction's clearing premium; sending it is a manual step from the exported list, not automated.
+
+## D-112 · 2026-09-05 · How the marketing home reads "launched", burns and last week's premium
+
+**Decision.** `/` treats the token as launched when `FeeRouter.writeToken() != address(0)`, the switch
+the timelock flips post-launch (SPEC §11); no env flag. WRITE burned to date is
+`WRITE.MAX_SUPPLY() − totalSupply()` (I-31: the token has no mint path), with an optional
+`FeeRouter.WriteFeePaid` log scan behind `FEE_ROUTER_FROM_BLOCK` for archive RPCs. Last week's premium
+and fee are Σ `premiumGross` / `fee` over `AuctionHouse.auctions()` for auctions that closed in the last
+7 days. WRITE in bonds is `WRITE.balanceOf(BondManager)`.
+
+**Alternatives.** Event scans for all three (the public RPC keeps ~19 minutes of logs, README);
+`NEXT_PUBLIC_STAKE_ENABLED` as the launch flag (a human switch that can disagree with the chain);
+`capMode == SAFETY_MODULE` (can be flipped before or after the fee path, so it is not "the token exists").
+
+**Consequences.** The pre-launch page shows the landing's slider model with one line, "Model. Live after
+launch."; after launch the same four stations show chain figures. The supply-delta burn figure includes
+any voluntary `burn()` by holders, not only the router's; the note under the figure says which source
+was used.

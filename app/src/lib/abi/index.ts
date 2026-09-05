@@ -6,6 +6,8 @@ export {
   settlementOracleAbi,
   riskModuleAbi,
   feeRouterAbi,
+  bondManagerAbi,
+  writeAbi,
   safetyModuleAbi,
   writePriceOracleAbi,
   emissionsControllerAbi,
@@ -52,3 +54,7 @@ export type RequestStatusName = (typeof RequestStatus)[number];
 
 /** Canonical Multicall3, verified present on 46630. */
 export const MULTICALL3 = "0xcA11bde05977b3631167028862bE2a173976CA11" as const;
+
+/** `IBondManager.BondKind` / `BondAsset`. */
+export const BondKind = { CURATOR: 0, MM: 1 } as const;
+export const BondAsset = { USDG: 0, WRITE: 1 } as const;

@@ -1,0 +1,175 @@
+/* Ported verbatim from landing/index.html; every rule scoped under .landing so the app's own
+   components keep their styles. Values are the landing's, unchanged. */
+.landing{--bg:#FFFFFF; --bg-2:#F1F2EE; --ink:#000000; --gray:#62676F; --rule:#D9DBDF; --blue:#2A3BFF; --blue-dark:#1B27B8; --blue-tint:#E8EAFF; --max:1200px; --gutter:24px;}
+.landing{margin:0;background:var(--bg);color:var(--ink); font-family:var(--font-sans); font-size:17px;line-height:1.5;-webkit-font-smoothing:antialiased; font-variant-numeric:tabular-nums;overflow-x:clip;}
+.landing a{color:inherit}
+.landing h1, .landing h2, .landing h3{margin:0;font-weight:800;letter-spacing:-0.03em;line-height:1}
+.landing p{margin:0}
+.landing .wrap{max-width:var(--max);margin:0 auto;padding-left:var(--gutter);padding-right:var(--gutter)}
+.landing :focus-visible{outline:3px solid var(--blue);outline-offset:3px}
+.landing .nav{display:flex;align-items:center;justify-content:space-between;padding:20px 0;border-bottom:1px solid var(--ink)}
+.landing .mark{text-decoration:none;font-weight:800;font-size:21px;letter-spacing:-0.03em;display:flex;align-items:center;gap:10px}
+.landing .mark i{display:inline-block;width:14px;height:14px;background:var(--blue);border-radius:2px}
+.landing .nav ul{list-style:none;margin:0;padding:0;display:flex;gap:26px;align-items:center}
+.landing .nav li a{text-decoration:none;font-size:15px;color:var(--gray)}
+.landing .nav li a:hover{color:var(--ink)}
+.landing .btn{white-space:nowrap;display:inline-block;text-decoration:none;font-weight:700;font-size:15px;padding:12px 18px;border-radius:3px;border:1.5px solid var(--blue);line-height:1;transition:background .15s,color .15s,border-color .15s}
+.landing .btn-blue{background:var(--blue);color:#fff}
+.landing .btn-blue:hover{background:var(--blue-dark);border-color:var(--blue-dark)}
+.landing .btn-plain{background:transparent;color:var(--blue)}
+.landing .btn-plain:hover{background:var(--blue-tint)}
+.landing .nav .btn{padding:10px 14px}
+@media (max-width:720px){
+.landing .nav ul li:not(:last-child){display:none}
+}
+.landing .hero{display:grid;grid-template-columns:minmax(0,1.05fr) minmax(0,1fr);gap:56px;padding:64px 0 72px;align-items:start}
+.landing .hero h1{font-size:clamp(40px,5.2vw,72px);max-width:13ch}
+.landing .hero .lede{margin-top:24px;font-size:clamp(17px,1.35vw,19px);max-width:46ch;color:var(--ink)}
+.landing .hero .cta{margin-top:28px;display:flex;gap:12px;align-items:center;flex-wrap:wrap}
+.landing .hero .doc{font-size:15px;color:var(--gray);text-decoration:underline;text-underline-offset:4px}
+@media (max-width:900px){
+.landing .hero{grid-template-columns:1fr;gap:36px;padding:44px 0 56px}
+}
+.landing .calc{border:1.5px solid var(--ink);border-radius:4px;padding:22px 22px 18px;background:#fff}
+.landing .calc-head{display:flex;justify-content:space-between;align-items:baseline;gap:16px;flex-wrap:wrap}
+.landing .calc-head h2{font-size:18px;font-weight:700;letter-spacing:-0.01em}
+.landing .calc-head small{font-size:13px;color:var(--gray)}
+.landing .seg{display:flex;gap:6px;margin-top:16px;flex-wrap:wrap}
+.landing .seg button{font:inherit;font-weight:700;font-size:14px;padding:8px 12px;border:1.5px solid var(--rule);background:#fff;border-radius:3px;cursor:pointer;color:var(--ink)}
+.landing .seg button[aria-pressed="true"]{border-color:var(--blue);background:var(--blue-tint);color:var(--blue-dark)}
+.landing .row{display:grid;grid-template-columns:1fr 1fr;gap:18px;margin-top:18px}
+.landing .field label{display:block;font-size:13px;color:var(--gray);margin-bottom:6px}
+.landing .field input[type=number]{font:inherit;font-size:18px;font-weight:700;width:100%;padding:8px 10px;border:1.5px solid var(--rule);border-radius:3px;background:#fff;color:var(--ink)}
+.landing .field input[type=range]{width:100%;accent-color:var(--blue);margin:10px 0 0}
+.landing .field .val{font-size:18px;font-weight:700}
+.landing .out{margin-top:18px;border-top:1px solid var(--ink);padding-top:14px;display:grid;grid-template-columns:1fr 1fr 1fr;gap:14px}
+.landing .out .k{font-size:13px;color:var(--gray)}
+.landing .out .v{font-size:clamp(22px,2.2vw,30px);font-weight:800;letter-spacing:-0.02em;color:var(--blue);line-height:1.1;margin-top:2px}
+.landing .out .v.ink{color:var(--ink)}
+.landing .chart{margin-top:16px}
+.landing .chart svg{width:100%;height:auto;display:block}
+.landing .chart text{font-family:var(--font-sans);font-size:11px;fill:var(--gray)}
+.landing .chart .hold{stroke:var(--rule);stroke-width:2;fill:none}
+.landing .chart .ow{stroke:var(--blue);stroke-width:2.5;fill:none;transition:d .25s ease}
+.landing .chart .axis{stroke:var(--rule);stroke-width:1}
+.landing .chart .zero{stroke:var(--ink);stroke-width:1}
+.landing .chart .kline{stroke:var(--blue);stroke-width:1;stroke-dasharray:3 3;transition:transform .25s ease}
+.landing .note{margin-top:12px;font-size:13px;color:var(--gray);line-height:1.45}
+@media (max-width:520px){
+.landing .row{grid-template-columns:1fr}
+.landing .out{grid-template-columns:1fr 1fr}
+.landing .calc{padding:16px}
+}
+.landing .sec{padding:88px 0 0}
+.landing .sec h2{font-size:clamp(30px,3.6vw,48px);max-width:22ch}
+.landing .sec .sub{margin-top:14px;max-width:58ch;color:var(--gray)}
+.landing .band{background:var(--bg-2);margin-top:88px;padding:72px 0}
+.landing .band .sec{padding-top:0}
+.landing .three{display:grid;grid-template-columns:repeat(3,1fr);gap:40px;margin-top:40px}
+.landing .three h3{font-size:19px;font-weight:700;letter-spacing:-0.01em;padding-top:14px;border-top:1.5px solid var(--ink)}
+.landing .three p{margin-top:10px;font-size:16px;max-width:34ch}
+.landing .three .n{color:var(--blue);font-weight:800}
+@media (max-width:820px){
+.landing .three{grid-template-columns:1fr;gap:24px}
+}
+.landing table{width:100%;border-collapse:collapse;margin-top:36px}
+.landing caption{text-align:left;font-size:13px;color:var(--gray);padding-bottom:12px;caption-side:top}
+.landing th{text-align:left;font-weight:500;font-size:13px;color:var(--gray);padding:0 0 10px;border-bottom:1.5px solid var(--ink)}
+.landing td{padding:16px 0;border-bottom:1px solid var(--rule);vertical-align:top;font-size:16.5px}
+.landing th:not(:first-child), .landing td:not(:first-child){padding-left:18px}
+.landing td.b{font-weight:700}
+.landing .series td:first-child{font-weight:800;font-size:19px;letter-spacing:-0.02em}
+.landing .ledger .sym{font-weight:800;font-size:21px;letter-spacing:-0.02em;line-height:1}
+.landing .ledger .name{display:block;font-size:13px;color:var(--gray);margin-top:4px}
+.landing .ledger .pct{color:var(--blue);font-weight:800}
+.landing .ledger .cap{display:flex;align-items:center;gap:10px}
+.landing .ledger .cap i{width:110px;height:5px;background:var(--rule);position:relative;display:block;border-radius:2px;overflow:hidden}
+.landing .ledger .cap i::after{content:"";position:absolute;inset:0;width:var(--w);background:var(--ink)}
+.landing .ledger .act{text-align:right}
+.landing .ledger .act a{text-decoration:none;font-weight:700;color:var(--blue);white-space:nowrap}
+.landing .ledger .act a.soon{color:var(--gray)}
+.landing .ledger tr:hover td{background:rgba(42,59,255,.04)}
+@media (max-width:820px){
+.landing .series th:nth-child(4), .landing .series td:nth-child(4){display:none}
+.landing .ledger th:nth-child(4), .landing .ledger td:nth-child(4){display:none}
+}
+@media (max-width:600px){
+.landing .ledger th:nth-child(3), .landing .ledger td:nth-child(3){display:none}
+.landing .ledger .name{display:none}
+.landing .ledger .cap i{display:none}
+.landing .series th:nth-child(3), .landing .series td:nth-child(3){display:none}
+.landing td{font-size:15px}
+.landing th:not(:first-child), .landing td:not(:first-child){padding-left:12px}
+}
+.landing .two{display:grid;grid-template-columns:1fr 1fr;gap:48px;margin-top:36px}
+.landing .two p{max-width:48ch}
+.landing .two p + p{margin-top:14px}
+@media (max-width:820px){
+.landing .two{grid-template-columns:1fr;gap:20px}
+}
+.landing .jobs{display:grid;grid-template-columns:repeat(3,1fr);gap:40px;margin-top:40px}
+.landing .jobs h3{font-size:19px;font-weight:700;letter-spacing:-0.01em;padding-top:14px;border-top:1.5px solid var(--blue)}
+.landing .jobs p{margin-top:10px;font-size:16px;max-width:34ch}
+.landing .not{margin-top:36px;padding:22px 24px;border:1.5px solid var(--ink);border-radius:4px;max-width:760px}
+.landing .not h3{font-size:17px;font-weight:700}
+.landing .not p{margin-top:8px;font-size:16px}
+@media (max-width:820px){
+.landing .jobs{grid-template-columns:1fr;gap:24px}
+}
+.landing .loop-head{display:flex;justify-content:space-between;align-items:flex-start;gap:32px}
+.landing .wheel{width:72px;height:72px;flex:none;margin-top:6px}
+.landing .wheel g{transform-origin:40px 40px;animation:spin var(--spin,8s) linear infinite}
+@keyframes spin{to{transform:rotate(360deg)}}
+.landing .loop{margin-top:40px;border:1.5px solid var(--ink);border-radius:4px;padding:26px 26px 22px}
+.landing .ctl label{display:block;font-size:13px;color:var(--gray)}
+.landing .ctl .val{font-size:clamp(26px,3vw,40px);font-weight:800;letter-spacing:-0.03em;color:var(--blue);line-height:1.05;margin-top:4px}
+.landing .ctl input[type=range]{width:100%;accent-color:var(--blue);margin:14px 0 0}
+.landing .ctl .ticks{display:flex;justify-content:space-between;font-size:12px;color:var(--gray);margin-top:4px}
+.landing .stations{list-style:none;margin:30px 0 0;padding:0;display:grid;grid-template-columns:repeat(4,1fr);gap:0;counter-reset:st}
+.landing .stations li{position:relative;padding:18px 26px 18px 0;border-top:1.5px solid var(--ink)}
+.landing .stations li + li{padding-left:26px}
+.landing .stations li + li::before{content:"";position:absolute;left:-1px;top:-1.5px;width:0;height:0;border-left:11px solid var(--blue);border-top:7px solid transparent;border-bottom:7px solid transparent;transform:translateY(-6px)}
+.landing .stations .k{display:block;font-size:13px;color:var(--gray)}
+.landing .stations .v{display:block;font-size:clamp(24px,2.4vw,34px);font-weight:800;letter-spacing:-0.03em;color:var(--blue);line-height:1.1;margin-top:4px}
+.landing .stations p{margin-top:10px;font-size:15px;max-width:30ch}
+.landing .stations p b{color:var(--blue)}
+.landing .stations .v small{font-size:15px;font-weight:600;color:var(--gray);letter-spacing:0}
+.landing .ret{height:40px;border:1.5px solid var(--blue);border-top:0;border-radius:0 0 8px 8px;position:relative;margin:6px 0 0}
+.landing .ret::before{content:"";position:absolute;left:-7px;top:-4px;width:0;height:0;border-bottom:12px solid var(--blue);border-left:6px solid transparent;border-right:6px solid transparent}
+.landing .ret-label{margin-top:14px;font-size:15px;color:var(--gray);max-width:70ch}
+.landing .ret-label b{color:var(--ink);font-weight:700}
+@media (max-width:900px){
+.landing .stations{grid-template-columns:1fr}
+.landing .stations li, .landing .stations li + li{padding:16px 0}
+.landing .stations li + li::before{left:0;top:-1.5px;transform:translateY(-6px) rotate(90deg);border-left-color:var(--blue)}
+.landing .ret{display:none}
+.landing .loop{padding:18px 16px 16px}
+.landing .wheel{width:52px;height:52px}
+}
+@media (prefers-reduced-motion:reduce){
+.landing .wheel g{animation:none}
+}
+.landing .claim{margin:0;padding:22px 0;border-top:1.5px solid var(--ink);border-bottom:1.5px solid var(--ink);font-size:clamp(18px,2vw,26px);font-weight:700;letter-spacing:-0.02em;line-height:1.25;max-width:32ch}
+.landing .end{margin-top:96px;border-top:1.5px solid var(--ink);padding-top:40px;display:flex;justify-content:space-between;align-items:flex-end;gap:32px;flex-wrap:wrap}
+.landing .end h2{font-size:clamp(28px,3.4vw,44px);max-width:20ch}
+.landing .end p{margin-top:12px;color:var(--gray);max-width:46ch}
+@media (prefers-reduced-motion:reduce){
+.landing .chart .ow, .landing .chart .kline{transition:none}
+}
+
+/* Additions for the live instruments and the form. Same type scale and colours as above. */
+.landing .out .last{margin-top:6px;font-size:13px;color:var(--gray);line-height:1.35}
+.landing .out .last a{color:var(--blue);font-weight:700;text-decoration:none}
+.landing .out .last a:hover{text-decoration:underline;text-underline-offset:3px}
+.landing .ledger .src{display:block;font-size:11.5px;font-weight:600;color:var(--gray);letter-spacing:0.01em;margin-top:3px}
+.landing .ctl .model-note{margin-top:10px}
+.landing .join{display:flex;gap:10px;align-items:stretch;flex-wrap:wrap;position:relative}
+.landing .join input[type=text]{font:inherit;font-size:16px;font-weight:600;width:min(100%,320px);padding:10px 12px;border:1.5px solid var(--rule);border-radius:3px;background:#fff;color:var(--ink)}
+.landing .join input[type=text]:focus{border-color:var(--blue);outline:none}
+.landing .join .hp{position:absolute;left:-9999px;width:1px;height:1px;opacity:0}
+.landing .join .btn{padding:12px 18px}
+.landing .join .err{flex-basis:100%;font-size:13px;color:var(--gray)}
+.landing .joined{font-size:16px;max-width:46ch;padding-top:14px;border-top:1.5px solid var(--blue);color:var(--ink)}
+.landing .joined b{color:var(--blue);word-break:break-all}
+.landing .sr-only{position:absolute;width:1px;height:1px;padding:0;margin:-1px;overflow:hidden;clip:rect(0,0,0,0);border:0}
+@media (max-width:600px){.landing .join input[type=text]{width:100%}.landing .join .btn{width:100%;text-align:center}}

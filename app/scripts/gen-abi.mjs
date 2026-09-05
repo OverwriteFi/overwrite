@@ -173,6 +173,18 @@ const SLICES = {
   feeRouter: {
     artifact: "FeeRouter.sol/FeeRouter.json",
     functions: ["feeBps", "mode", "writeDiscountBps", "writeBurnShareBps", "writeToken"],
+    events: ["WriteFeePaid"],
+    errors: [],
+  },
+  bondManager: {
+    artifact: "BondManager.sol/BondManager.json",
+    functions: ["writeToken", "bondAsset", "requiredAmountOf", "migrationEndsAt"],
+    events: [],
+    errors: [],
+  },
+  write: {
+    artifact: "WRITE.sol/WRITE.json",
+    functions: ["MAX_SUPPLY", "totalSupply", "balanceOf", "decimals", "symbol"],
     events: [],
     errors: [],
   },

@@ -183,3 +183,46 @@ export interface StakeOverviewDto {
     liveCapUsd: string;
   }>;
 }
+
+/** One ticker on the landing calculator and ledger. Deployed vaults carry chain data; the rest, keeper defaults. */
+export interface CalcVaultDto {
+  symbol: string;
+  name: string;
+  deployed: boolean;
+  /** Annualised volatility used by the model, bps (keeper fallback vol). */
+  volBps: number;
+  /** Cap distance the model starts at: the live/last auction's strike distance when there is one, else the keeper default. */
+  capBps: { weekday: number; weekend: number };
+  capSource: "auction" | "default";
+  /** `AuctionHouse.strikeDistanceBounds` per kind, bps. null when not deployed. */
+  bounds: { weekday: [number, number]; weekend: [number, number] } | null;
+  /** Latest cleared auction, if any. */
+  lastAuction: { fraction: number; kind: SeriesKind; seriesId: string; closedAt: string } | null;
+  capUsedFraction: number | null;
+  href: string | null;
+}
+
+/** The WRITE loop's figures. `launched` decides whether the page shows the slider model or these. */
+export interface LoopDto {
+  chainNow: string;
+  launched: boolean;
+  /** SafetyModule.safetyModuleValueUSD, USDG 6 dp; null when the token layer is not deployed. */
+  safetyModuleValueUsd: string | null;
+  safetyModuleValueOk: boolean;
+  /** Σ CapController.vaultCapUSD, 6 dp. */
+  totalCapUsd: string;
+  /** Σ vault TVL, 6 dp (vaults with a readable cap price). */
+  totalDepositsUsd: string;
+  /** Cleared auctions whose window closed in the last 7 days. */
+  lastWeek: { premiumGross: string; fee: string; auctions: number };
+  /** WRITE burned to date, 18 dp, and where the number came from. */
+  burned: { amount: string; source: "supply" | "events" } | null;
+  /** WRITE held by BondManager (posted bonds), 18 dp. */
+  bonded: string | null;
+  /** WRITE required per MM bond once bonds are in WRITE, 18 dp; null before the migration. */
+  mmBondWrite: string | null;
+  /** WRITE/USD, 8 dp, when the oracle has a price. */
+  writePrice8: string | null;
+  /** CapController.k, WAD. */
+  k: string;
+}
