@@ -1,0 +1,73 @@
+{
+  "_comment": "Robinhood Chain testnet. Addresses come from ../contracts/deployments/46630.json; this file holds only the numbers the keeper chooses. sharedKeysAllowed mirrors deployerIsAdmin in contracts/config/46630.json (D-105): on this chain one funded key is admin, guardian, treasury and keeper, and MockDeployLib mints it a million USDG, so the separation-of-duties startup assertions are all false by design and are reported as a TESTNET DEVIATION banner instead of refusing to start. It must be false on 4663.",
+  "chainId": 46630,
+  "label": "robinhood-testnet",
+  "role": "full",
+  "sharedKeysAllowed": true,
+  "deploymentPath": "../contracts/deployments/46630.json",
+  "tickSeconds": 30,
+
+  "schedule": {
+    "clearDelaySeconds": 5,
+    "settleGraceSeconds": 600,
+    "queueOpsPerCall": 50
+  },
+
+  "pricing": {
+    "_comment": "See src/pricing/reserve.ts. The reserve is a floor, not a forecast: Black-Scholes at trailing realised vol sits below fair value by construction, which is the right direction of error for a number whose job is to stop a careless keeper selling calls for nothing (D-027). Variance accrues on a session clock, not a calendar one — a weekend series spans 2.16 calendar days and zero trading sessions, and pricing it on calendar time would make every weekend auction skip.",
+    "riskFreeRateBps": 0,
+    "volWindowDays": 30,
+    "minVolSamples": 10,
+    "volFloorBps": 500,
+    "volCapBps": 20000,
+    "reserveFactorBps": 10000,
+    "reserveMarginBps": 200,
+    "maxRoundScan": 4000,
+    "overnightVarianceDays": 0.15,
+    "weekendVarianceDays": 0.3,
+    "sessionsPerYear": 252
+  },
+
+  "monitor": {
+    "minKeeperEthWei": "20000000000000000",
+    "critKeeperEthWei": "5000000000000000",
+    "stalenessWarnRatioBps": 8000,
+    "pegMarginBps": 50,
+    "calendarWarnDays": 90,
+    "implementationPollSeconds": 300,
+    "coveragePollSeconds": 3600
+  },
+
+  "alerts": {
+    "cooldownSeconds": 900,
+    "minSeverity": "warn"
+  },
+
+  "tx": {
+    "maxAttempts": 5,
+    "backoffBaseMs": 1000,
+    "backoffCapMs": 60000,
+    "maxRederive": 2,
+    "confirmations": 1
+  },
+
+  "vaults": {
+    "NVDA": {
+      "enabled": true,
+      "assetClass": "SINGLE_NAME",
+      "strikeDistanceBps": { "weekday": 800, "weekend": 500 },
+      "minReserveBps": { "weekday": 10, "weekend": 3 },
+      "maxReserveBpsOfSpot": { "weekday": 150, "weekend": 60 },
+      "fallbackVolAnnualBps": 5500
+    },
+    "SPY": {
+      "_comment": "SPEC 7.2 and D-011 give the ETF weekday default as 200 bps, which is below the protocol floor STRIKE_LO_WEEKDAY = 300 and reverts DistanceOutOfBounds(200, 300, 1500). Verified against the live deployment: strikeDistanceBounds(SPY, WEEKDAY) = (300, 1500). 300 is used here and the conflict is recorded in DECISIONS D-109; the keeper validates this against the chain at startup and refuses to run rather than clamping.",
+      "enabled": true,
+      "assetClass": "ETF",
+      "strikeDistanceBps": { "weekday": 300, "weekend": 100 },
+      "minReserveBps": { "weekday": 10, "weekend": 3 },
+      "maxReserveBpsOfSpot": { "weekday": 100, "weekend": 40 },
+      "fallbackVolAnnualBps": 1800
+    }
+  }
+}

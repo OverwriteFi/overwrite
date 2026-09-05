@@ -368,3 +368,160 @@ references. The parser bug is fixed.
 
 The testnet system is for keeper and frontend end-to-end runs only. The real integrations are exercised by
 the mainnet fork test (step 1.6), which SPEC §1.8 names the primary test path.
+
+---
+
+## 11. Running the keeper
+
+The keeper is the only thing that drives the protocol. `openAuction` is the sole privileged call in the
+system (`KEEPER_ROLE`, D-028); `clear`, `settle`, `halt`, the queue processors, `releaseLocks` and
+`FeeRouter.flush` are permissionless, and the keeper runs them because somebody has to, not because the
+key is entitled to anything by doing so. Liveness never depends on it: anyone can settle.
+
+Code lives in `keeper/`. TypeScript on Node 22 with viem, holding exactly one key.
+
+### 11.1 Keys and what they can do
+
+| Key | Env | Can call | Cannot |
+|---|---|---|---|
+| Keeper | `KEEPER_PRIVATE_KEY` | `openAuction`, `clear`, `releaseLocks`, `settle`, `halt`, `resolveHaltedByOracle`, `processDeposits`, `processRedeems`, `flush` | anything else — `src/chain/tx.ts` refuses to sign a call whose (contract, function) pair is not on that list, and the addresses come from the deploy's own address book, so a config typo cannot aim a call elsewhere |
+| Guardian (optional) | `GUARDIAN_PRIVATE_KEY` | `pauseDeposits`, `pauseNewAuctions`, `unpauseDeposits`, `unpauseNewAuctions` | move any value. Ships **disarmed** (`GUARDIAN_AUTOPAUSE=false`); see 11.6 |
+
+The two must be different keys (D-029); the keeper refuses to start if they are equal. Neither is ever
+logged: pino redacts the known field names, and a second pass scrubs anything shaped like a 32-byte hex
+value or a URL carrying credentials out of every message.
+
+`resolveHalted` (the timelocked path 4) is deliberately **not** on the keeper's list. The keeper reports
+that a human resolution is needed; it never proposes one.
+
+### 11.2 First run
+
+```bash
+cd keeper
+npm ci
+npm run gen:abi          # regenerates src/abi/generated.ts from contracts/out, after a contract change
+npm run typecheck && npm test
+DRY_RUN=true npm run dev # simulates every action, sends nothing
+```
+
+A dry run is a real exercise of the decision logic: it builds hints, prices reserves and simulates each
+transaction against live state, and stops before `writeContract`. Read one tick of its output before
+turning it loose.
+
+Then either Docker or systemd, **not both** — two keepers sharing one key interleave nonces:
+
+```bash
+docker compose up -d --build          # from keeper/
+sudo systemctl enable --now overwrite-keeper
+curl -s http://127.0.0.1:8787/status | jq '.overall, .vaults[].state'
+```
+
+### 11.3 What it does, and when
+
+All times UTC. The Friday close is computed from `America/New_York`, so it is 20:00 UTC under EDT and
+21:00 UTC under EST. SPEC §5's fixed-timestamp rule holds: expiry never moves for a holiday or an early
+close, and it *cannot* — the contract requires expiry in [Fri 19:30, Fri 21:30] and a 13:00 ET half-day
+close is 18:00 UTC. The 2026/2027 NYSE calendar in `src/time/nyse.ts` therefore drives **notes and
+alerts only**.
+
+| When | Action |
+|---|---|
+| Monday 14:00 ± `openTolerance` | `openAuction(vault, WEEKDAY, fridayClose, distance, reserve)` |
+| Monday 14:15 | `clear` |
+| Friday close | `settle` — Chainlink at expiry (path 1), else the 30-min TWAP (path 2) |
+| Friday close + 10 min | `openAuction(vault, WEEKEND, Sunday 23:59, …)` |
+| Friday close + 25 min | `clear` |
+| Sunday 23:59 | `settle` — the 60-min TWAP (path 2), else the first fresh round after expiry (path 3, deadline Monday 15:00) |
+| any time, vault IDLE | `processDeposits` / `processRedeems`, `releaseLocks`, `flush` |
+
+The scheduler does not own these deadlines as cron callbacks. Every tick (default 30 s) re-derives what
+is due from chain state and epoch-week arithmetic, so a missed tick, a restart or an RPC outage costs
+latency and nothing else. Idempotency is the contract's: a second `openAuction` is refused `NOT_IDLE`, a
+second `clear` `WrongAuctionState`, a second `settle` `NOT_LIVE` — each caught at simulate, before
+anything is signed. `keeper/state/` is advisory only; deleting it loses no correctness.
+
+**The clock is chain time** — `block.timestamp`, never the host clock. That is what every contract check
+uses, and it is what lets the fork harness drive a whole simulated week through the same code (D-108).
+
+### 11.4 Strike and reserve
+
+The keeper supplies three numbers. `expiry`, because the DST offset is off-chain knowledge (D-046).
+`strikeDistanceBps`, because the strike itself is derived on chain from `sRef` and is never
+keeper-supplied (SPEC §7.2). And `reservePrice`, the one value the contract cannot verify and only
+bounds (SPEC §8.3).
+
+The reserve is a **floor, not a forecast** — see D-107. Black-Scholes at trailing realised volatility, on
+a session-based variance clock, clamped into `reserveBounds()` with a margin above the lower bound so a
+feed update between simulate and inclusion cannot invalidate it. When the estimator has too little
+history, or the feed has not moved at all, it falls back to the per-vault `fallbackVolAnnualBps` and says
+so. Every reserve is logged with its σ, that σ's source, the model price and the contract floor; the
+rounds behind each estimate are kept in `state/vol-<SYMBOL>.json` as an audit trail, because the reserve
+is the one input nobody else can reconstruct after the fact.
+
+Configured strike distances are checked against the live `strikeDistanceBounds()` at startup and the
+keeper **refuses to start** on a mismatch rather than clamping — selling a different option than the
+operator configured is the failure D-027 exists to prevent. That check is why SPY ships at 300 bps
+weekday and not the 200 the spec names: see D-109.
+
+### 11.5 Alerts — what each means and what to do
+
+Alerts reach Telegram when `TELEGRAM_BOT_TOKEN` and `TELEGRAM_CHAT_ID` are set, and always reach the log
+and `status.json`. They are deduplicated with a cooldown and cleared with an explicit `RECOVERED`.
+
+| Alert | Means | Do |
+|---|---|---|
+| `keeper.balance` | The keeper cannot pay for many more transactions | Top it up. CRIT means the next `openAuction` may not land |
+| `chainlink.staleness` | The vault's feed has used most (WARN) or all (CRIT) of its `weekdayMaxStale` budget | Nothing, on a weekend or a holiday — the 24/5 feed is quiet by design. Inside a session, check the feed on Blockscout; a weekday settle will fall through to the TWAP |
+| `usdg.staleness` / `usdg.peg` | The peg feed is stale, or USDG is outside the on-chain band | Neither halts a series. Both remove the **TWAP** path (SPEC §9.5), so a weekend series settles on path 3 instead. If the peg is genuinely broken, expect weekend settlements to run to the Monday 15:00 deadline |
+| `pool.coverage` | Fewer than `minObservationsInWindow` swaps in the last hour, or the ring cannot span `window + twapGrace` | The weekend TWAP path will be rejected `OBSERVATIONS`. Call `increaseObservationCardinalityNext` (permissionless) if cardinality is the problem; if the pool is simply quiet, path 3 is the fallback and this is informational |
+| `settlement.pending` WARN | A series is past expiry and not yet settled | Usually the grace window doing its job. Read the reason: `GRACE`, `TWAP_GRACE_OPEN`, `DEADLINE_OPEN` and `PATH_AVAILABLE` all mean "not yet, by design" |
+| `settlement.pending` CRIT | Well past grace, or the vault is HALTED | If HALTED, the alert carries `unlockAt`. Before it, only a timelocked `resolveHalted` can close the series (48 h, price inside the ±25 % band). After it, the keeper resolves permissionlessly on its own |
+| `HINT_UNVERIFIABLE` (settle log) | The run of invalid rounds before expiry is longer than the contract's 32-round skip bound, so **no** hint verifies | Do not retry; nothing can be built. The §9.6 backstop at `expiry + 7 days` is the only route, and the keeper takes it automatically |
+| `vault.drift` | A pause, a sunset, `oraclePaused`, a staged multiplier inside a live series, or vault state disagreeing with the AuctionHouse | A guardian pause is expected after any halt (D-050) and clears when a human unpauses. A staged multiplier inside a live series is the D-025 case: review that settlement before unpausing |
+| `implementation.watch` CRIT | The stock-token beacon or the USDG implementation changed | D-020. Pause deposits and new auctions immediately; do not unpause until a human has confirmed the new code keeps raw-unit `balanceOf`, no transfer fee, no transfer hooks and unchanged `decimals`. `n/a` on 46630 is correct — the testnet tokens are plain mocks, not proxies |
+| `nyse.calendar` | The holiday table is running out | Extend `NYSE_HOLIDAYS` / `NYSE_EARLY_CLOSES` in `src/time/nyse.ts` and bump `CALENDAR_KNOWN_THROUGH` |
+| `open.priceAvailable` | `capPrice` is unavailable, so the next `openAuction` would revert `NoReferencePrice` | Check the feed and the pool. This fires *before* the Monday window, which is the point |
+| `vault.empty` (INFO) | The vault holds nothing, so no auction can open | Expected on a fresh vault. Never paged |
+| reserve floor bound (log) | The contract's `minReserveBpsOfSpot` sat above the model price | Not a fault. If it happens every week for a vault, that curator floor is miscalibrated for the asset and wants a timelocked `setMinReserveBpsOfSpot`. SPEC §8.3 calls the 10/3 bps defaults placeholders "to be tuned against the keeper's implied-vol model"; this is that measurement |
+
+### 11.6 The guardian auto-pause
+
+D-020 asks the keeper to watch the stock-token beacon and the USDG implementation every five minutes and,
+on any change, pause deposits and new auctions on every vault with the guardian key. That path is
+implemented and ships **off** (`GUARDIAN_AUTOPAUSE=false`): pausing every vault is a real, user-visible
+action, and arming it should be a deliberate decision by whoever runs the server. Disarmed, the keeper
+still detects the change and pages; a human then pauses with the cold guardian key.
+
+To arm it, set a distinct `GUARDIAN_PRIVATE_KEY` holding `GUARDIAN_ROLE`, and `GUARDIAN_AUTOPAUSE=true`.
+
+### 11.7 A second, settle-only instance
+
+THREAT-MODEL RS-04 asks for a second keeper on a different host whose only job is to settle, so the grace
+window is never missed. Run it with `"role": "settle-only"` and **its own key**: `settle`, `halt` and
+`resolveHaltedByOracle` are permissionless, so that key needs no role at all and holds nothing. Never
+give two instances the same key — they would interleave nonces on every call.
+
+### 11.8 Testing a whole week without waiting a week
+
+```bash
+cd keeper && npm run week
+```
+
+Forks 46630 into anvil, warms the fork cache, then drives Monday's auction, the clear, Friday's
+settlement, the weekend auction, its clear and Sunday's settlement — through the keeper's own scheduler,
+jobs, hint builder and pricing. The harness only does what the outside world does: deposit, bond, bid,
+publish oracle data, move time. It asserts both series reach `SETTLED`, that the weekday settles on path 1
+and the weekend on path 2, and that re-running each tick never repeats a lifecycle action. Takes about
+three minutes; the log lands in `keeper/state/week.log`.
+
+Two things the run teaches that are easy to forget when operating for real:
+
+- **The public testnet RPC is not an archive node.** It keeps roughly 9 000 blocks — about 19 minutes at
+  the ~8 blocks/s this chain produces. Anvil fetches forked state lazily, so any slot first touched after
+  that window has closed fails `metadata is not found`. `scripts/fork-week.sh` warms everything up front
+  for exactly that reason, and `anvil_dumpState` does not help: it serialises only anvil's own modified
+  accounts, not the forked state it has cached.
+- **A bare time warp breaks every oracle at once.** `capPrice` has an 80 h bound, `referencePrice` and
+  `weekdayMaxStale` 26 h, `usdgMaxStale` 26 h, and any TWAP anchor needs an observation within 900 s plus
+  at least `minObservationsInWindow` inside the window. The harness posts rounds and observations across
+  every gap, exactly as `test/DayInTheLife.t.sol:_nextWeek()` does.

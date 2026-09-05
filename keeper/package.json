@@ -11,10 +11,14 @@
     "dev": "tsx watch src/index.ts",
     "start": "node dist/index.js",
     "build": "tsc -p tsconfig.json",
-    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "typecheck": "tsc -p tsconfig.json --noEmit && tsc -p tsconfig.test.json --noEmit",
     "lint": "eslint .",
     "format": "prettier --write .",
-    "format:check": "prettier --check ."
+    "format:check": "prettier --check .",
+    "gen:abi": "node scripts/gen-abi.mjs",
+    "test": "node --import tsx --test test/*.test.ts",
+    "week": "bash scripts/fork-week.sh",
+    "week:refresh": "bash scripts/fork-week.sh --refresh"
   },
   "dependencies": {
     "node-cron": "^3.0.3",

@@ -1,0 +1,67 @@
+{
+  "_comment": "Used only by test/week/simulate-week.ts. Identical to keeper.46630.json except minVolSamples, lowered from 10 to 5 so a nine-day simulated week can reach the real realised-vol estimator by the Friday auction. The Monday auction still takes the fallback, because at that point the fork's feed history is the deployed one: 14 rounds all answering exactly 200.00. Both branches are therefore exercised in a single run, which is the point.",
+  "chainId": 46630,
+  "label": "robinhood-testnet",
+  "role": "full",
+  "sharedKeysAllowed": true,
+  "deploymentPath": "../contracts/deployments/46630.json",
+  "tickSeconds": 1,
+  "schedule": {
+    "clearDelaySeconds": 5,
+    "settleGraceSeconds": 600,
+    "queueOpsPerCall": 50
+  },
+  "pricing": {
+    "_comment": "See src/pricing/reserve.ts. The reserve is a floor, not a forecast: Black-Scholes at trailing realised vol sits below fair value by construction, which is the right direction of error for a number whose job is to stop a careless keeper selling calls for nothing (D-027). Variance accrues on a session clock, not a calendar one \u2014 a weekend series spans 2.16 calendar days and zero trading sessions, and pricing it on calendar time would make every weekend auction skip.",
+    "riskFreeRateBps": 0,
+    "volWindowDays": 30,
+    "minVolSamples": 5,
+    "volFloorBps": 500,
+    "volCapBps": 20000,
+    "reserveFactorBps": 10000,
+    "reserveMarginBps": 200,
+    "maxRoundScan": 4000,
+    "overnightVarianceDays": 0.15,
+    "weekendVarianceDays": 0.3,
+    "sessionsPerYear": 252
+  },
+  "monitor": {
+    "minKeeperEthWei": "20000000000000000",
+    "critKeeperEthWei": "5000000000000000",
+    "stalenessWarnRatioBps": 8000,
+    "pegMarginBps": 50,
+    "calendarWarnDays": 90,
+    "implementationPollSeconds": 300,
+    "coveragePollSeconds": 3600
+  },
+  "alerts": {
+    "cooldownSeconds": 900,
+    "minSeverity": "warn"
+  },
+  "tx": {
+    "maxAttempts": 5,
+    "backoffBaseMs": 1000,
+    "backoffCapMs": 60000,
+    "maxRederive": 2,
+    "confirmations": 1
+  },
+  "vaults": {
+    "NVDA": {
+      "enabled": true,
+      "assetClass": "SINGLE_NAME",
+      "strikeDistanceBps": {
+        "weekday": 800,
+        "weekend": 500
+      },
+      "minReserveBps": {
+        "weekday": 10,
+        "weekend": 3
+      },
+      "maxReserveBpsOfSpot": {
+        "weekday": 150,
+        "weekend": 60
+      },
+      "fallbackVolAnnualBps": 5500
+    }
+  }
+}

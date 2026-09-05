@@ -1,0 +1,80 @@
+# Overwrite keeper — systemd unit.
+#
+# Install:
+#   sudo useradd --system --home /opt/overwrite --shell /usr/sbin/nologin overwrite
+#   sudo install -d -o overwrite -g overwrite /opt/overwrite
+#   # deploy the built keeper (dist/, node_modules/, config/, package.json) to /opt/overwrite/keeper
+#   sudo install -m 0600 -o overwrite -g overwrite .env /etc/overwrite/keeper.env
+#   sudo cp deploy/overwrite-keeper.service /etc/systemd/system/
+#   sudo systemctl daemon-reload && sudo systemctl enable --now overwrite-keeper
+#
+# Do not run this alongside docker compose. Two keepers sharing one key interleave nonces on every
+# permissionless call; pick one.
+
+[Unit]
+Description=Overwrite protocol keeper
+Documentation=https://github.com/overwrite/overwrite/blob/master/docs/RUNBOOK.md
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=overwrite
+Group=overwrite
+WorkingDirectory=/opt/overwrite/keeper
+
+# Holds KEEPER_PRIVATE_KEY. Must be 0600 and owned by root; systemd reads it before dropping
+# privileges, so the keeper's own user never needs read access to the file.
+EnvironmentFile=/etc/overwrite/keeper.env
+Environment=NODE_ENV=production
+Environment=TZ=UTC
+# systemd creates and chowns /var/lib/overwrite-keeper, which is what StateDirectory is for. A bare
+# ReadWritePaths= pointing at a directory that does not exist yet fails the unit at start.
+StateDirectory=overwrite-keeper
+Environment=STATE_DIR=/var/lib/overwrite-keeper
+# Loopback here is correct: unlike the container case, there is no network namespace in the way.
+Environment=STATUS_HOST=127.0.0.1
+Environment=STATUS_PORT=8787
+
+ExecStart=/usr/bin/node dist/index.js
+
+# An RPC outage restarts the process in a tight loop. Without RestartSec and a disabled start-limit
+# window, systemd gives up after five restarts in ten seconds and leaves the keeper stopped — during
+# precisely the incident you most want it to keep trying.
+Restart=always
+RestartSec=5
+StartLimitIntervalSec=0
+
+# SIGTERM releases the single-instance lock and posts a shutdown alert; give it room to finish.
+KillSignal=SIGTERM
+TimeoutStopSec=30
+
+# Hardening. The keeper needs the network, one writable directory and nothing else.
+NoNewPrivileges=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectKernelLogs=true
+ProtectControlGroups=true
+ProtectClock=true
+ProtectHostname=true
+ProtectProc=invisible
+RestrictNamespaces=true
+RestrictRealtime=true
+RestrictSUIDSGID=true
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+LockPersonality=true
+MemoryDenyWriteExecute=false
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+UMask=0077
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=overwrite-keeper
+
+[Install]
+WantedBy=multi-user.target

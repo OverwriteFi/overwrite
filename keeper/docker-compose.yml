@@ -1,0 +1,53 @@
+# Run the keeper under Docker.
+#
+#   cd keeper && docker compose up -d --build
+#   docker compose logs -f
+#   curl -s http://127.0.0.1:8787/status | jq .overall
+#
+# Do NOT run this alongside the systemd unit. They are two ways to run the same thing, and two keepers
+# sharing one key interleave nonces on every permissionless call. The keeper refuses to start while
+# another instance is heartbeating on the same STATE_DIR — but they only see each other if they share
+# that directory, and here they would not. Pick one.
+
+services:
+  keeper:
+    build:
+      # The repo root, so the Dockerfile can copy contracts/deployments.
+      context: ..
+      dockerfile: keeper/Dockerfile
+    image: overwrite/keeper:latest
+    container_name: overwrite-keeper
+    restart: unless-stopped
+    env_file:
+      - ../.env
+    environment:
+      # Bind 0.0.0.0 *inside* the container. Binding 127.0.0.1 there would make the published port
+      # unreachable: Docker's proxy connects to the container's own IP, not to its loopback.
+      STATUS_HOST: 0.0.0.0
+      STATUS_PORT: "8787"
+      STATE_DIR: /app/state
+      DEPLOYMENT_PATH: /app/deployments/46630.json
+      NODE_ENV: production
+    ports:
+      # Host loopback only. Put a reverse proxy in front if the frontend needs /status.
+      - "127.0.0.1:8787:8787"
+    volumes:
+      - keeper-state:/app/state
+      - ../contracts/deployments:/app/deployments:ro
+    read_only: true
+    tmpfs:
+      # status.json is written atomically into its own directory on the state volume, never /tmp: a
+      # rename across filesystems fails EXDEV. /tmp is here only for anything Node itself wants.
+      - /tmp
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "5"
+
+volumes:
+  keeper-state:

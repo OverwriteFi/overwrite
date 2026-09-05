@@ -1645,3 +1645,125 @@ protocol reads. *Import from `test/` in the script* — rejected as above.
 
 **Consequences.** Fourteen import lines updated across ten test files; no behaviour change, and the full suite
 stayed green through the move.
+
+---
+
+## D-107 · 2026-09-05 · The auction reserve is a Black-Scholes floor at trailing realised volatility, on a session variance clock
+
+**Decision.** The keeper prices `reservePrice` as
+`clamp(max(BS(S, K, T_var, σ_realised, r) · reserveFactor, floor), reserveBounds.lo · (1 + margin), min(spotCap, reserveBounds.hi))`,
+where `σ_realised` is close-to-close volatility over **NYSE session closes** in the last 30 days
+(annualised `× sqrt(252)`), and `T_var` is measured on a **variance clock**: a full session is 1.0
+variance-day, an early close is pro-rated, an overnight gap is `overnightVarianceDays` (0.15) and a
+weekend or holiday gap is `weekendVarianceDays` (0.3), all divided by 252. `r` is 0 by default.
+
+Guards: a `reserveMarginBps` (200) above the contract's lower bound; the keeper-side spot cap applied
+*before* the contract floor, never after; and a fallback to a per-vault `fallbackVolAnnualBps` when there
+are fewer than `minVolSamples` session returns **or** the estimate is degenerate (σ = 0, non-finite, or
+below `volFloorBps`). The rounds behind each estimate are persisted to `keeper/state/vol-<SYMBOL>.json`.
+
+**Why.** SPEC §8.3 and D-027 both defer the reserve to "the keeper's implied-vol model" and call the
+10 bps / 3 bps defaults "placeholders to be tuned against the keeper's implied-vol model before mainnet".
+No such model was ever specified — no vol source, no estimator, no annualisation. This is that decision.
+
+Realised volatility is the right input *because* it is biased low. Short-dated OTM equity calls trade
+above trailing realised vol essentially always, so a Black-Scholes price at realised vol sits below fair
+value by construction. That is the correct direction of error for a **floor**, whose job is to stop a
+rogue or careless keeper selling the vault's upside for nothing (D-027), and the wrong direction for a
+valuation. The keeper never uses this number to accept or reject a bid; the uniform clearing price does
+that (SPEC §8.2).
+
+The variance clock is not decoration. A WEEKDAY series runs Monday 14:00 UTC to Friday 16:00 ET — 4.25
+calendar days, about 5.5 sessions. A WEEKEND series runs Friday 16:10 ET to Sunday 23:59 UTC — 2.16
+calendar days and **zero** sessions. On calendar time the weekend option looks like half the weekday
+option's risk when the underlying does not trade at all in that window; the reserve comes out several
+times too high, every weekend auction skips, and the failure presents as "no MM demand". Session-close
+bucketing matters for the same reason in the other direction: a 24/5 feed publishes nothing on Saturday
+or Sunday, so calendar-day bucketing injects two exactly-zero log returns every week and `sqrt(252)` on
+top of that understates σ by about 17 %.
+
+The two degeneracy guards both fire on 46630 today, which is why both exist: the deployed mock feed has
+14 rounds all answering exactly 200.00, so the count guard alone would hand Black-Scholes σ = 0, price an
+OTM call at its intrinsic value of zero, and produce a reserve of zero on the one parameter §8.3 exists to
+protect.
+
+**Alternatives considered.** *Calendar time with `sqrt(365)`* — self-consistent, and within 1 % of correct
+for a weekday series, but it still values a weekend at 2.16 days of risk. Rejected. *Implied vol from an
+options venue* — there is no listed options market on these tokens, and importing a surface from the
+underlying equity adds an unverifiable off-chain dependency to a number the contract already bounds.
+*A fixed bps-of-spot reserve* — that is what the contract floor already is; the whole point is to price
+above it when volatility justifies it. *Parkinson / Garman-Klass on intraday round extrema* — more
+efficient per observation and free with the data already fetched; worth adding later as a cross-check,
+not as the primary estimator, because its bias under an irregular 24/5 sampling schedule is not
+characterised here.
+
+**Consequences.** `keeper/src/pricing/{blackScholes,realisedVol,reserve}.ts`,
+`keeper/src/time/tradingTime.ts`, RUNBOOK §11.4. The quote reports `floorBinds` and `coverRatio`
+(model ÷ contract floor) so the placeholder floors of D-027 can finally be measured against something:
+a vault whose ratio sits below 1 every week has a miscalibrated curator floor and will skip every week.
+The gap weights are the model's one judgement call; they are config, they are logged with every reserve,
+and the RUNBOOK says what moving them does.
+
+---
+
+## D-108 · 2026-09-05 · The keeper's clock is chain time, and its scheduler derives rather than remembers
+
+**Decision.** The keeper's `now` is `block.timestamp` from the latest block, never the host clock. Wall
+time is used only for tick cadence, alert cooldowns and log stamps. Each tick re-derives, from chain
+state plus epoch-week arithmetic, what action is due, and fires it; no cron callback owns a deadline, and
+no on-disk ledger is consulted to decide anything. `keeper/state/` is authoritative only for in-flight
+transaction recovery, alert dedupe and the volatility audit trail.
+
+**Why.** Every check the keeper is trying to satisfy is written against `block.timestamp` — `canOpen`'s
+window, `auctionClose`, `expiry`, `twapGrace`, `WEEKEND_CL_DEADLINE`, `HALTED_TIMEOUT`. Reasoning in wall
+time means reasoning in the wrong units, and on an L2 the two can differ. It also makes the whole weekly
+lifecycle testable: the fork harness warps the chain and the same scheduler code runs a simulated week in
+three minutes.
+
+Deriving rather than remembering makes idempotency the *contract's* property rather than the keeper's. A
+second `openAuction` inside the 2-hour tolerance window is refused `NOT_IDLE` by `CoveredCallVault
+.canOpenAuction`, a second `clear` `WrongAuctionState`, a second `settle` `NOT_LIVE` — and because every
+send simulates first, none of those ever becomes a signed transaction. A missed tick, a restart, a clock
+skew or an RPC outage therefore costs latency and nothing else, and deleting the state directory is safe.
+
+**Alternatives considered.** *node-cron callbacks per event* — the scaffold's shape, and the reason it was
+replaced: a process that is down at 14:00 on Monday loses the week, and `openTolerance` exists precisely
+so that it need not. *A persisted "what I did last week" ledger as the source of truth* — it can disagree
+with the chain, and when it does the keeper acts on the wrong picture; chain state cannot.
+
+**Consequences.** `keeper/src/scheduler.ts`, `keeper/src/chain/clients.ts` (`chainNow`),
+`keeper/src/state.ts`, RUNBOOK §11.3. Two instances sharing one key would still interleave nonces on the
+permissionless calls, so the keeper takes a heartbeat lock on its state directory and refuses to start
+beside a live sibling; THREAT-MODEL RS-04's second settle-only instance therefore runs with its own key,
+which needs no role at all.
+
+---
+
+## D-109 · 2026-09-05 · The ETF weekday strike default of 200 bps is unopenable; the keeper refuses to start rather than clamp
+
+**Decision.** SPEC §7.2 and D-011 both give the keeper's ETF defaults as 200 / 100 bps (weekday /
+weekend). The weekday half is below the protocol floor and cannot be used. `keeper/config/keeper.46630.json`
+ships SPY at **300** bps weekday, and the keeper validates every configured distance against the live
+`strikeDistanceBounds(vault, kind)` at startup and **refuses to start** on a mismatch, rather than
+clamping into range.
+
+**Why.** `AuctionHouse.STRIKE_LO_WEEKDAY = 300`, and `strikeDistanceBounds` raises that further by the
+curator floor. Confirmed against the live 46630 deployment: `strikeDistanceBounds(SPY, WEEKDAY)` returns
+`(300, 1500)`, so `openAuction(SPY, WEEKDAY, …, 200, …)` reverts `DistanceOutOfBounds(200, 300, 1500)` —
+the SPY vault could never have opened a weekday series at the documented default.
+
+Refusing to start rather than clamping is the same reasoning as D-027 itself. Silently selling a
+1.5×-further-OTM option than the operator configured is a different product at a different price, and the
+place to notice that is at boot, not in a weekly premium report.
+
+**Alternatives considered.** *Clamp to the floor and warn* — the keeper would run, and nobody would read
+the warning. *Raise `STRIKE_LO_WEEKDAY`'s exception for ETFs in the contract* — a contract change to
+accommodate a documentation error, and it would weaken the bound that stops a hot keeper selling
+near-the-money weeklies. *Leave 200 in the config and let it revert weekly* — the failure would look like
+an RPC problem rather than a configuration one.
+
+**Consequences.** SPEC §7.2's "ETF 200 / 100" line should be corrected to 300 / 100 at the next spec
+revision. Note the two ends of the same problem meet here: 300 bps is the *floor*, so SPY weekday has no
+headroom below, and at that distance the contract's 10 bps reserve floor is above the model price for any
+plausible ETF volatility — see D-107's `coverRatio`. Both point at the same conclusion, that the
+placeholder curator parameters for ETFs need tuning before an ETF vault can clear.
