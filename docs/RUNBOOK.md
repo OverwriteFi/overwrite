@@ -57,7 +57,11 @@ Nothing here sends a transaction. Do all of it before touching the Ledger.
    ```bash
    cast call 0x379EC4f7C378F34a1B47E4F3cbeBCbAC3E8E9F15 "latestRoundData()(uint80,int256,uint256,uint256,uint80)" --rpc-url robinhood
    ```
-5. **Set `ROBINHOOD_RPC_URL` in `.env`** (gitignored; `.env.example` has placeholders only).
+5. **Set `ROBINHOOD_RPC_URL` in `.env`** (gitignored; `.env.example` has placeholders only). **Include the
+   scheme** (`https://…`): `deploy.sh` prepends `https://` when it is missing, but a hand-run
+   `forge script … --rpc-url "$ROBINHOOD_RPC_URL"` or `cast … --rpc-url` does not and fails with
+   `invalid provider URL … relative URL without a base` (REHEARSAL-1 item 7). The same applies to
+   `ROBINHOOD_TESTNET_RPC_URL`.
 6. **Run the fork test against mainnet.** This is the real integration test — it runs the same deploy library
    against the actual USDG, stock token, feed and pool:
    ```bash
@@ -183,7 +187,11 @@ The queued operation is public. Use the wait: anyone reviewing the deployment ca
 
 ### 3.3 Execute
 
-Send the printed `executeBatch` calldata from the admin EOA once `isOperationReady` is true.
+Send the printed `executeBatch` calldata from the admin EOA once `isOperationReady` is true. Sent early it
+reverts `TimelockUnexpectedOperationState(id, Ready)` — that is the delay working, not a wiring error
+(REHEARSAL-1 §13 shows the revert and the successful execute 48 h later). The three `cast call`s of §3.2
+are the whole pre-flight for *every* timelock operation, not only batch A: `hashOperationBatch` for the id,
+`getTimestamp` for the ready time, `isOperationReady` before signing the execute.
 
 ### 3.4 Check
 
@@ -323,6 +331,28 @@ governance speed.
 Note that no account holds `DEFAULT_ADMIN_ROLE` on either `RiskModule` or `AuctionHouse` — the owner is the
 admin. `grantRole` and `revokeRole` will always revert. Use `setGuardian` and `setKeeper`.
 
+### 8.1 Reopen after a pause
+
+Two routes reopen a paused vault, and they cost very different things (REHEARSAL-1 S-2).
+
+- **Guardian unpause — immediate.** Either guardian key may call `riskModule.unpauseDeposits(vault | ALL)` and
+  `unpauseNewAuctions(vault | ALL)` with no delay (SPEC §15, D-029: either holder can unpause the other's
+  pause). **This is the route after a false alarm** or once the incident that caused the pause is understood.
+  ```bash
+  cast send <RISK_MODULE> "unpauseNewAuctions(address)" 0x0000000000000000000000000000000000000000 --rpc-url robinhood --ledger   # guardian key
+  cast send <RISK_MODULE> "unpauseDeposits(address)"    0x0000000000000000000000000000000000000000 --rpc-url robinhood --ledger
+  ```
+- **Timelock unpause — 48 h.** The owner may schedule the same two calls through the TimelockController.
+  Use it only when the reopening itself should sit in the public queue for review. Its cost is the calendar:
+  a pause on Monday that is unpaused through the timelock reopens on Wednesday, the Monday opening window
+  (14:00 ± `openTolerance`) is gone, and **that week's weekday series is skipped**; the keeper reports
+  "waiting (outside every opening window)" until Friday's weekend window. Schedule the unpause so that it
+  executes *before* the next opening window, or accept the skipped week explicitly.
+
+Either way, a `HALTED` vault stays closed by its own state machine until the series is resolved (D-050);
+unpausing only reopens deposits and new auctions. After any unpause, confirm with
+`riskModule.depositsPaused(vault)` / `auctionsPaused(vault)` and watch the keeper's next tick.
+
 ---
 
 ## 9. Deferred — governance decides when
@@ -349,9 +379,12 @@ None of this is part of the deploy (D-063: it depends on the launch venue, which
 
 ## 10. The 46630 rehearsal
 
-The whole procedure was rehearsed on testnet 46630 on 2026-09-04. `contracts/deployments/46630.json` is the
-result: 26 contracts plus `TickMath`, all four stages executed, all 27 verified on Blockscout, and
-`Verify.s.sol` green against the live chain.
+The whole procedure was rehearsed on testnet 46630 on 2026-09-04 and **redeployed on 2026-09-05 after the
+internal audit** (D-113; commit e471df6). `contracts/deployments/46630.json` is the current result: 18 new
+protocol contracts on top of the eight reused mocks and the reused `TickMath`, all four stages executed, all
+18 verified on Blockscout, `Verify.s.sol` green against the live chain, and the keeper's week simulation
+green against the new addresses. A full operating rehearsal on an anvil fork of that deployment is
+`docs/REHEARSAL-1.md`.
 
 Two differences from the procedure above, both recorded in `config/46630.json` and both reported by
 `Verify.s.sol` as a `TESTNET DEVIATION` banner:
@@ -360,7 +393,8 @@ Two differences from the procedure above, both recorded in `config/46630.json` a
   because only one key is funded there. That lets `run()` schedule and execute both batches itself and finish
   all four stages in one command. `deployerIsAdmin: true` in the config makes the deviation machine-readable
   and is the only thing that relaxes any assertion — the deployer still owns no contract and holds no WRITE,
-  and those are still asserted.
+  and those are still asserted. Since D-113 it is also what *enables* the direct schedule-and-execute path:
+  a zero delay alone no longer does, and `Config.validate` refuses `deployerIsAdmin: true` on 4663.
 - **Every external is mocked** (SPEC §1.8, D-014): USDG, the USDG/USD feed, and per vault the stock token,
   the Chainlink feed and the 0.05 % pool. A cast sweep of every address in `docs/SPEC.md` against 46630
   confirmed only Uniswap v4, Permit2 and Multicall3 exist there. The eight mocks are listed in the `mocked`
@@ -400,6 +434,13 @@ value or a URL carrying credentials out of every message.
 
 `resolveHalted` (the timelocked path 4) is deliberately **not** on the keeper's list. The keeper reports
 that a human resolution is needed; it never proposes one.
+
+**What market makers need to know about payouts** (REHEARSAL-1 §8). Option allocations are pull-based in
+two ways, and neither expires: `AuctionHouse.claimOptions(seriesId, to)` mints the ERC-1155 options, which
+are then redeemed with `OptionToken.claim(seriesId, qty, to)` after settlement; or
+`AuctionHouse.claimPayout(seriesId, to)` mints and claims in one transaction (D-038). Escrow above the
+clearing price and unfilled quantity is pulled with `withdrawRefund(to)`. Payout is in the stock token,
+`payoutPerOption = (S − K) / S` per option (SPEC §7.1).
 
 ### 11.2 First run
 
@@ -444,10 +485,11 @@ alerts only**.
 | When | Action |
 |---|---|
 | Monday 14:00 ± `openTolerance` | `openAuction(vault, WEEKDAY, fridayClose, distance, reserve)` |
-| Monday 14:15 | `clear` |
+| Monday 14:15 → 15:15 | `clear` — **inside `[auctionClose, auctionClose + clearGrace)`**, 1 h by default (D-113 F-2). A later clear takes the skip path: every bid is refunded, the series is SKIPPED, the week's premium is gone. Auctions opened in one tick close a few seconds apart, so this is per vault, not one moment |
+| after a skip, same window | `openAuction` again — a SKIPPED series hands the vault back IDLE and `canOpen` (D-046) accepts another open inside the same window; the keeper re-opens at once (`openAuction KIND (retry after skip)`) |
 | Friday close | `settle` — Chainlink at expiry (path 1), else the 30-min TWAP (path 2) |
 | Friday close + 10 min | `openAuction(vault, WEEKEND, Sunday 23:59, …)` |
-| Friday close + 25 min | `clear` |
+| Friday close + 25 min → +85 min | `clear`, same `clearGrace` rule |
 | Sunday 23:59 | `settle` — the 60-min TWAP (path 2), else the first fresh round after expiry (path 3, deadline Monday 15:00) |
 | any time, vault IDLE | `processDeposits` / `processRedeems`, `releaseLocks`, `flush` |
 
@@ -491,6 +533,7 @@ and `status.json`. They are deduplicated with a cooldown and cleared with an exp
 | `chainlink.staleness` | The vault's feed has used most (WARN) or all (CRIT) of its `weekdayMaxStale` budget | Nothing, on a weekend or a holiday — the 24/5 feed is quiet by design. Inside a session, check the feed on Blockscout; a weekday settle will fall through to the TWAP |
 | `usdg.staleness` / `usdg.peg` | The peg feed is stale, or USDG is outside the on-chain band | Neither halts a series. Both remove the **TWAP** path (SPEC §9.5), so a weekend series settles on path 3 instead. If the peg is genuinely broken, expect weekend settlements to run to the Monday 15:00 deadline |
 | `pool.coverage` | Fewer than `minObservationsInWindow` swaps in the last hour, or the ring cannot span `window + twapGrace` | The weekend TWAP path will be rejected `OBSERVATIONS`. Call `increaseObservationCardinalityNext` (permissionless) if cardinality is the problem; if the pool is simply quiet, path 3 is the fallback and this is informational |
+| `clear.window` WARN / CRIT | WARN: fewer than 15 minutes left in `[auctionClose, auctionClose + clearGrace)`; CRIT: the window has passed | WARN: the keeper is not clearing — check its log and balance; anyone may call `clear`. CRIT: the next `clear` **skips** the series and refunds every bid (REHEARSAL-1 S-1). If still inside the opening window the keeper re-opens on its own; otherwise the week is lost |
 | `settlement.pending` WARN | A series is past expiry and not yet settled | Usually the grace window doing its job. Read the reason: `GRACE`, `TWAP_GRACE_OPEN`, `DEADLINE_OPEN` and `PATH_AVAILABLE` all mean "not yet, by design" |
 | `settlement.pending` CRIT | Well past grace, or the vault is HALTED | If HALTED, the alert carries `unlockAt`. Before it, only a timelocked `resolveHalted` can close the series (48 h, price inside the ±25 % band). After it, the keeper resolves permissionlessly on its own |
 | `HINT_UNVERIFIABLE` (settle log) | The run of invalid rounds before expiry is longer than the contract's 32-round skip bound, so **no** hint verifies | Do not retry; nothing can be built. The §9.6 backstop at `expiry + 7 days` is the only route, and the keeper takes it automatically |
@@ -530,6 +573,12 @@ jobs, hint builder and pricing. The harness only does what the outside world doe
 publish oracle data, move time. It asserts both series reach `SETTLED`, that the weekday settles on path 1
 and the weekend on path 2, and that re-running each tick never repeats a lifecycle action. Takes about
 three minutes; the log lands in `keeper/state/week.log`.
+
+`npm run week` drives one vault (`WEEK_SYMBOL`, default NVDA) and never pauses anything. The wider run —
+three depositors on two vaults, two bidders, an ITM and an OTM settlement, a queued redeem, a guardian
+pause, a timelocked unpause — is `docs/REHEARSAL-1.md`; its driver (`keeper/test/week/rehearsal.ts`) is a
+one-off and is not maintained. If it is run again, advance chain time between keeper re-runs: the first run
+did not, and Monday's SPY auction was still uncleared when the driver next ticked on Friday (S-1).
 
 Two things the run teaches that are easy to forget when operating for real:
 
