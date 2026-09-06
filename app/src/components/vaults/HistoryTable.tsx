@@ -1,7 +1,7 @@
 import { Empty } from "@/components/site/States";
 import { fmtBps, fmtDateShort, fmtPct, fmtPrice8, fmtUsd } from "@/lib/format";
 import type { SeriesRowDto, VaultSnapshotDto } from "@/lib/reads/types";
-import { OUTCOME_LABEL, OUTCOME_SENTENCE } from "./status";
+import { outcomeText } from "./status";
 
 const settled = (r: SeriesRowDto) =>
   r.outcome === "expired-worthless" || r.outcome === "called-away" || r.outcome === "resolved" || r.outcome === "skipped";
@@ -34,6 +34,7 @@ export function HistoryTable({ v, rows }: { v: VaultSnapshotDto; rows: SeriesRow
           {done.map((r) => {
             const se = r.series;
             const price = se && BigInt(se.settlementPrice) > 0n ? fmtPrice8(se.settlementPrice) : "—";
+            const text = outcomeText(r.outcome, r.auction);
             return (
               <tr key={r.id}>
                 <td>
@@ -57,12 +58,12 @@ export function HistoryTable({ v, rows }: { v: VaultSnapshotDto; rows: SeriesRow
                   )}
                 </td>
                 <td>
-                  <b>{OUTCOME_LABEL[r.outcome]}</b>
+                  <b>{text.label}</b>
                   <span className="k">
                     {r.outcome === "called-away" && r.payoutFraction !== null
                       ? `${fmtPct(r.payoutFraction)} of each written token paid out. `
                       : ""}
-                    {OUTCOME_SENTENCE[r.outcome]}
+                    {text.sentence}
                   </span>
                 </td>
               </tr>

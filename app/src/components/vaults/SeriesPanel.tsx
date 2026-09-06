@@ -1,6 +1,7 @@
 import { Row, Rows, Tag } from "@/components/site/Bits";
 import { fmtBps, fmtDateUtc, fmtPct, fmtPrice8, fmtTokens, fmtUsd } from "@/lib/format";
 import { premiumFractionOf } from "@/lib/reads/overview";
+import { outcomeText } from "./status";
 import type { VaultSnapshotDto } from "@/lib/reads/types";
 
 const SERIES_LABEL: Record<string, string> = {
@@ -65,7 +66,7 @@ export function SeriesPanel({ v }: { v: VaultSnapshotDto }) {
           {fmtUsd(a.reservePrice, v.usdg.decimals)} per token
         </Row>
       ) : (
-        <Row label="Result">No bid met the floor; the vault keeps its upside and sells it next week.</Row>
+        <Row label="Result">{outcomeText("skipped", a).sentence}</Row>
       )}
       {se.state === "SETTLED" || se.state === "RESOLVED" ? (
         <>

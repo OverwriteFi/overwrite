@@ -31,6 +31,7 @@ import type {
   SeriesDto,
   SeriesKind,
   SeriesRowDto,
+  SkipReason,
   VaultSnapshotDto,
   VaultStatus,
 } from "./types";
@@ -61,6 +62,7 @@ function toAuction(id: bigint, v: Record<string, unknown>): AuctionDto {
   return {
     id: s(id),
     vault: v.vault as Address,
+    skipReason: null,
     kind: Number(v.kind ?? 0) as SeriesKind,
     state: AuctionState[Number(v.state ?? 0)] ?? "NONE",
     auctionOpen: s(v.auctionOpen),
@@ -122,6 +124,26 @@ function toRow(a: AuctionDto, se: SeriesDto | null): SeriesRowDto {
   };
 }
 
+/**
+ * The reason a SKIPPED auction took the skip path (REHEARSAL-1 S-9), from the bid list and the vault's
+ * coverage state. Below-reserve bids revert, so an empty bid list is "no bid met the floor"; with bids
+ * present the skip was coverage (nothing to cover, or every share queued for withdrawal) or timing (a
+ * clear after `auctionClose + clearGrace`, or after expiry).
+ */
+export function skipReasonFor(
+  a: { state: AuctionDto["state"] },
+  bidCount: number,
+  vaultNow: { totalAssets: bigint; totalSupply: bigint; escrowedRedeemShares: bigint },
+): SkipReason | null {
+  if (a.state !== "SKIPPED") return null;
+  if (bidCount === 0) return "no-bids";
+  if (vaultNow.totalAssets === 0n) return "no-assets";
+  if (vaultNow.totalSupply > 0n && vaultNow.escrowedRedeemShares >= vaultNow.totalSupply) {
+    return "all-shares-escrowed";
+  }
+  return "late-clear";
+}
+
 /** Every series ever opened, grouped by vault address, newest first. State reads only — no logs. */
 async function readAllSeries(): Promise<Map<Address, SeriesRowDto[]>> {
   const ot = deployment.core.optionToken;
@@ -148,6 +170,36 @@ async function readAllSeries(): Promise<Map<Address, SeriesRowDto[]>> {
       args: [BigInt(a.id)],
     })),
   );
+  // Skip reasons (S-9): the bid list per skipped auction, plus each vault's coverage state.
+  const skipped = auctions.filter((a) => a.state === "SKIPPED");
+  if (skipped.length > 0) {
+    const vaultsWithSkips = [...new Set(skipped.map((a) => a.vault))];
+    const raw = await multicall([
+      ...skipped.map((a) => ({ address: ah, abi: auctionHouseAbi, functionName: "bids", args: [BigInt(a.id)] })),
+      ...vaultsWithSkips.flatMap((vault) => [
+        { address: vault, abi: vaultAbi, functionName: "totalAssets" },
+        { address: vault, abi: vaultAbi, functionName: "totalSupply" },
+        { address: vault, abi: vaultAbi, functionName: "escrowedRedeemShares" },
+      ]),
+    ] as Call[]);
+    const coverage = new Map<Address, { totalAssets: bigint; totalSupply: bigint; escrowedRedeemShares: bigint }>();
+    vaultsWithSkips.forEach((vault, i) => {
+      const base = skipped.length + i * 3;
+      coverage.set(vault, {
+        totalAssets: pick<bigint>(raw[base], 0n),
+        totalSupply: pick<bigint>(raw[base + 1], 0n),
+        escrowedRedeemShares: pick<bigint>(raw[base + 2], 0n),
+      });
+    });
+    skipped.forEach((a, i) => {
+      const bids = raw[i]?.ok ? (raw[i].value as readonly unknown[]) : [];
+      a.skipReason = skipReasonFor(a, bids.length, coverage.get(a.vault) ?? {
+        totalAssets: 1n,
+        totalSupply: 0n,
+        escrowedRedeemShares: 0n,
+      });
+    });
+  }
   const byVault = new Map<Address, SeriesRowDto[]>();
   auctions.forEach((a, i) => {
     const r = seriesRaw[i];
@@ -247,7 +299,13 @@ async function readVault(
     const au = extra[cursor++];
     const rec = extra[cursor++];
     if (se?.ok) series = toSeries(currentSeriesId, se.value as Record<string, unknown>);
-    if (au?.ok) auction = toAuction(currentSeriesId, au.value as Record<string, unknown>);
+    if (au?.ok) {
+      auction = toAuction(currentSeriesId, au.value as Record<string, unknown>);
+      // The history rows already carry the skip reason for this id (readAllSeries runs first).
+      if (auction.state === "SKIPPED") {
+        auction.skipReason = history.find((r) => r.id === auction!.id)?.auction.skipReason ?? null;
+      }
+    }
     if (rec?.ok) {
       const r = rec.value as Record<string, unknown>;
       if (r.halted) haltedAt = s(r.haltedAt);

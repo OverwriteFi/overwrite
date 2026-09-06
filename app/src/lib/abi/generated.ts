@@ -3,7 +3,7 @@
 
 /* eslint-disable */
 // prettier-ignore
-/** `CoveredCallVault.sol/CoveredCallVault.json` — 111 fragments. */
+/** `CoveredCallVault.sol/CoveredCallVault.json` — 112 fragments. */
 export const vaultAbi = [
   {
     "type": "error",
@@ -1016,6 +1016,19 @@ export const vaultAbi = [
   },
   {
     "type": "function",
+    "name": "escrowedRedeemShares",
+    "inputs": [],
+    "outputs": [
+      {
+        "name": "",
+        "type": "uint256",
+        "internalType": "uint256"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
     "name": "freeAssets",
     "inputs": [],
     "outputs": [
@@ -1751,7 +1764,7 @@ export const vaultAbi = [
   }
 ] as const;
 
-/** `AuctionHouse.sol/AuctionHouse.json` — 65 fragments. */
+/** `AuctionHouse.sol/AuctionHouse.json` — 66 fragments. */
 export const auctionHouseAbi = [
   {
     "type": "error",
@@ -2442,6 +2455,19 @@ export const auctionHouseAbi = [
         "name": "reason",
         "type": "bytes32",
         "internalType": "bytes32"
+      }
+    ],
+    "stateMutability": "view"
+  },
+  {
+    "type": "function",
+    "name": "clearGrace",
+    "inputs": [],
+    "outputs": [
+      {
+        "name": "",
+        "type": "uint64",
+        "internalType": "uint64"
       }
     ],
     "stateMutability": "view"

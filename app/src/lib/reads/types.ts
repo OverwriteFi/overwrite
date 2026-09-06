@@ -24,9 +24,20 @@ export interface SeriesDto {
   multiplierAtOpen: string;
 }
 
+/**
+ * Why a SKIPPED auction was skipped, derived from chain state (REHEARSAL-1 S-9). `AuctionHouse.clear`
+ * skips for exactly five reasons (SPEC §8.2 step 8): no bid, nothing coverable, every share escrowed for
+ * redeem, past expiry, or past `auctionClose + clearGrace`. Bids below the reserve revert at `bid`, so
+ * "no bid" is also "no bid met the floor". The last two cannot be told apart after the fact and are one
+ * reason here; the coverage reasons are read from the vault's current state.
+ */
+export type SkipReason = "no-bids" | "late-clear" | "no-assets" | "all-shares-escrowed";
+
 export interface AuctionDto {
   id: string;
   vault: Address;
+  /** Set only when `state === "SKIPPED"`. */
+  skipReason: SkipReason | null;
   kind: SeriesKind;
   state: AuctionStateName;
   auctionOpen: string;

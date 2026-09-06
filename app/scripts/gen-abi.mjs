@@ -39,6 +39,7 @@ const SLICES = {
       "queuedDepositTokens",
       "withdrawalClaimable",
       "withdrawalClaimableTotal",
+      "escrowedRedeemShares",
       "premiumClaimable",
       "accPremiumPerShare",
       // erc-20 / erc-4626
@@ -107,6 +108,7 @@ const SLICES = {
       "previewClear",
       "canOpen",
       "openTolerance",
+      "clearGrace",
       "isVault",
       "bids",
       "bidders",
