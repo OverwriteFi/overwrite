@@ -11,7 +11,8 @@ export {
   poolAbi,
   stockTokenAbi,
   erc20Abi,
-  // fork-harness only — never reachable from the send allowlist
+  // fork harness, and the 46630-only testnet upkeep job (src/jobs/testnetUpkeep.ts); the send
+  // allowlist admits `setRound` / `write` solely when that job is on and the chain id is 46630
   mockAggregatorAbi,
   mockPoolAbi,
   mockStockTokenAbi,

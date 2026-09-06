@@ -10,6 +10,7 @@ import { resolveIfPossible, settleSeries } from "./jobs/settle.js";
 import type { Logger } from "./logger.js";
 import { readVault, type VaultSnapshot } from "./protocol.js";
 import type { StateDir } from "./state.js";
+import type { TestnetUpkeep } from "./jobs/testnetUpkeep.js";
 import {
   AUCTION_DURATION,
   describe,
@@ -65,6 +66,8 @@ export class Scheduler {
     private readonly sender: Sender,
     private readonly state: StateDir,
     private readonly log: Logger,
+    /** 46630 only: keeps the mock feeds and pools alive between the real lifecycle actions. */
+    private readonly upkeep: TestnetUpkeep | null = null,
   ) {}
 
   get recentActions(): readonly ActionRecord[] {
@@ -100,6 +103,16 @@ export class Scheduler {
       const r = await this.stepVault(snapshot, vault, now);
       results.push(r);
       actions.push(...this.recent.slice(0, this.recent.length - before));
+    }
+
+    // After the lifecycle, never before it: a fresh feed round must not land between `planOpen`'s read
+    // of `sRef` and the `openAuction` send in the same tick, which would move `reserveBounds().lo` under
+    // a reserve that was already simulated (the reserveMarginBps case in pricing/reserve.ts).
+    if (this.upkeep) {
+      for (const rec of await this.upkeep.tick(now)) {
+        this.record(rec);
+        actions.push(rec);
+      }
     }
 
     return { now, vaults: results, actions };

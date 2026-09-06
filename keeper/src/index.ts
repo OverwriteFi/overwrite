@@ -5,6 +5,7 @@ import { activeVaults, loadConfig, loadEnv, type Env } from "./config.js";
 import { createLogger, type Logger } from "./logger.js";
 import { Alerter } from "./monitor/alerts.js";
 import { runChecks, worst, type Check } from "./monitor/checks.js";
+import { TestnetUpkeep } from "./jobs/testnetUpkeep.js";
 import { GuardianModule } from "./monitor/guardian.js";
 import { StatusServer } from "./monitor/http.js";
 import { buildStatus, writeStatus } from "./monitor/status.js";
@@ -102,13 +103,31 @@ async function main(): Promise<void> {
     publicClient: clients.publicClient,
     wallet: clients.keeperWallet,
     account: clients.keeper,
-    allow: buildKeeperAllowTable(cfg.deployment, cfg.file.role),
+    allow: buildKeeperAllowTable(cfg.deployment, cfg.file.role, {
+      testnetUpkeep: cfg.file.testnetUpkeep.enabled,
+    }),
     options: cfg.file.tx,
     dryRun: env.DRY_RUN,
     log,
   });
 
-  const scheduler = new Scheduler(cfg, clients.publicClient, sender, state, log);
+  let upkeep: TestnetUpkeep | null = null;
+  if (cfg.file.testnetUpkeep.enabled) {
+    upkeep = new TestnetUpkeep(
+      cfg.deployment,
+      cfg.file.testnetUpkeep,
+      clients.publicClient,
+      sender,
+      state,
+      log,
+    );
+    log.warn(
+      `TESTNET UPKEEP ON: this keeper also publishes the mock feed rounds and pool observations ` +
+        `(${upkeep.describe()}). On 4663 this cannot be enabled.`,
+    );
+  }
+
+  const scheduler = new Scheduler(cfg, clients.publicClient, sender, state, log, upkeep);
   const server = new StatusServer(
     { host: env.STATUS_HOST, port: env.STATUS_PORT, staleAfterMs: cfg.file.tickSeconds * 3000 },
     log,

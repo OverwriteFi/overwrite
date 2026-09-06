@@ -73,6 +73,12 @@ const envSchema = z.object({
   TELEGRAM_BOT_TOKEN: optionalText,
   TELEGRAM_CHAT_ID: optionalText,
 
+  /**
+   * Turns on the 46630 mock upkeep (src/jobs/testnetUpkeep.ts) without a separate config file, so the
+   * `testnet-demo` compose profile is one env var on top of the normal keeper. Refused on any other chain.
+   */
+  TESTNET_UPKEEP: bool,
+
   /** Legacy scaffold field; the scheduler polls instead of firing on a cron. Ignored, kept for .env compat. */
   KEEPER_CRON: optionalText,
 });
@@ -209,10 +215,46 @@ const keeperConfigSchema = z.object({
     })
     .default({}),
 
+  /**
+   * Keeps the 46630 mocks alive for the public demo (src/jobs/testnetUpkeep.ts). `enabled` is refused
+   * on any chain but 46630 by `assertUpkeepAllowed`, and the send allowlist admits the mock functions
+   * under the same condition, so no config can point this at mainnet. Intervals mirror the seeded
+   * history of `MockDeployLib` (a feed round every 4 h, more than one pool swap per hour).
+   */
+  testnetUpkeep: z
+    .object({
+      enabled: z.boolean().default(false),
+      feedIntervalSeconds: z
+        .number()
+        .int()
+        .min(60)
+        .max(86_400)
+        .default(4 * 3600),
+      usdgIntervalSeconds: z
+        .number()
+        .int()
+        .min(60)
+        .max(86_400)
+        .default(4 * 3600),
+      poolIntervalSeconds: z.number().int().min(30).max(3600).default(600),
+      walkStepBps: z.number().int().min(0).max(500).default(40),
+      /** Must stay well under the 1 500 bps weekend TWAP bound and the 3 000 bps jump guard. */
+      walkBandBps: z.number().int().min(0).max(1_000).default(800),
+      usdgJitterBps: z.number().int().min(0).max(100).default(5),
+    })
+    .default({}),
+
   vaults: z.record(z.string(), vaultConfigSchema),
 });
 
 export type KeeperFileConfig = z.infer<typeof keeperConfigSchema>;
+
+/** The mocks exist only on 46630; writing feed rounds anywhere else is not a thing a keeper may do. */
+export function assertUpkeepAllowed(chainId: number, enabled: boolean): void {
+  if (enabled && chainId !== 46630) {
+    throw new Error(`testnetUpkeep.enabled is only allowed on chain 46630, not ${chainId}`);
+  }
+}
 
 export interface ResolvedConfig {
   env: Env;
@@ -256,6 +298,7 @@ export function loadFileConfig(
   if (parsed.data.chainId === 4663 && parsed.data.sharedKeysAllowed) {
     throw new Error("sharedKeysAllowed must be false on mainnet 4663");
   }
+  assertUpkeepAllowed(parsed.data.chainId, parsed.data.testnetUpkeep.enabled);
   return parsed.data;
 }
 
@@ -267,6 +310,10 @@ export function loadConfig(
 ): Omit<ResolvedConfig, "env" | "keeperAddress"> & { env: Env; keeperAddress: `0x${string}` } {
   const configPath = env.KEEPER_CONFIG ?? `./config/keeper.${env.CHAIN_ID}.json`;
   const file = loadFileConfig(configPath, env.CHAIN_ID, cwd);
+  if (env.TESTNET_UPKEEP) {
+    assertUpkeepAllowed(env.CHAIN_ID, true);
+    file.testnetUpkeep.enabled = true;
+  }
   const deployment = loadDeployment(deploymentPathFor(env, file), env.CHAIN_ID, cwd);
 
   const unknown = Object.keys(file.vaults).filter(

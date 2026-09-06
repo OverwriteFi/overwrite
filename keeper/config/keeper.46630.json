@@ -43,6 +43,17 @@
     "minSeverity": "warn"
   },
 
+  "testnetUpkeep": {
+    "_comment": "Off here; the `testnet-demo` compose profile turns it on with TESTNET_UPKEEP=true (src/jobs/testnetUpkeep.ts). A stock-feed round every 4 h on a ±40 bps random walk held inside ±8 % of the anchor, a USDG/USD round at par ±5 bps on the same cadence, a pool observation every 10 min at the feed's price. Only accepted on 46630.",
+    "enabled": false,
+    "feedIntervalSeconds": 14400,
+    "usdgIntervalSeconds": 14400,
+    "poolIntervalSeconds": 600,
+    "walkStepBps": 40,
+    "walkBandBps": 800,
+    "usdgJitterBps": 5
+  },
+
   "tx": {
     "maxAttempts": 5,
     "backoffBaseMs": 1000,

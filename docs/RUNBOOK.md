@@ -591,3 +591,71 @@ Two things the run teaches that are easy to forget when operating for real:
   `weekdayMaxStale` 26 h, `usdgMaxStale` 26 h, and any TWAP anchor needs an observation within 900 s plus
   at least `minObservationsInWindow` inside the window. The harness posts rounds and observations across
   every gap, exactly as `test/DayInTheLife.t.sol:_nextWeek()` does.
+
+### 11.9 The public testnet demo: keeping 46630 alive by itself
+
+On 46630 every external is a mock (§10, SPEC §1.8). Nobody publishes Chainlink rounds there and nobody
+swaps in the pools, so a deployment left to itself is unusable within a day: the stock feeds cross
+`weekdayMaxStale` (26 h), `referencePrice` reverts `NoReferencePrice` at the next Monday open, and the
+Sunday TWAP fails §9.3's minimum-observations rule for want of a single swap. The `testnet-demo` compose
+profile runs the normal keeper plus one extra job, `src/jobs/testnetUpkeep.ts`, that plays the market:
+
+| What | Cadence | Value |
+|---|---|---|
+| stock-feed round, per vault | every 4 h (`MockDeployLib.FEED_PERIOD`) | last answer × exp(σ·z), σ = 40 bps, clamped to ±8 % of an anchor (the answer seen at first run, kept in `state/upkeep-anchor-<SYMBOL>.json`) — well inside the 15 % weekend TWAP bound and the 30 % jump guard |
+| USDG/USD round | every 4 h | 1.00 ± 5 bps; the peg band is ±2 % |
+| pool observation, per vault | every 10 min | the tick that prices the stock at the feed's latest answer, at the pool's current liquidity, so any Sunday 23:59 window holds ≥ 3 observations with the newest inside 900 s and the TWAP agrees with Friday's round |
+
+Every "is it due" question is answered from chain state (the newest round's `updatedAt`, the newest
+observation's timestamp), so a restart never double-posts and a missed tick only delays. The job runs
+*after* the lifecycle step of each tick, never before it: a round landing between `planOpen`'s read of
+`sRef` and the `openAuction` send would move `reserveBounds().lo` under an already-simulated reserve.
+
+**It cannot run anywhere else.** `TESTNET_UPKEEP=true` (or `testnetUpkeep.enabled` in the config) is
+refused by `src/config.ts` on any `CHAIN_ID` but 46630; `buildKeeperAllowTable` only admits `setRound`
+and `write` on the mock addresses when the address book's own `chainId` is 46630; and the job's
+constructor asserts both again. On 4663 the same addresses are real Chainlink proxies and real pools with
+no such functions.
+
+Run it from `keeper/`, naming the service so the plain `keeper` service does not start beside it:
+
+```bash
+docker compose --env-file ../.env --profile testnet-demo up -d --build keeper-testnet-demo
+docker compose --profile testnet-demo logs -f keeper-testnet-demo
+curl -s http://127.0.0.1:8787/status | jq '.overall, [.recentActions[] | select(.action|startswith("upkeep"))][:3]'
+```
+
+`KEEPER_PRIVATE_KEY` comes from the repo root `.env` through `--env-file`, as in 11.2. On 46630 it is the
+one funded key (D-105), which holds `KEEPER_ROLE`; the mocks have no owner, so it needs nothing else. Keep
+it topped up: the job adds roughly 300 transactions a day per vault (288 observations, 6 rounds) plus the
+USDG rounds, each a few thousand gas. Both compose services share the `keeper-state` volume on purpose: if
+the plain `keeper` is ever started next to the demo, the second one refuses on the single-instance lock
+(`another keeper is running`) instead of interleaving nonces with the first. The systemd unit does not
+share that volume, so never run it on the same key at the same time.
+
+The first tick after start logs `TESTNET UPKEEP ON` with the cadence, then posts whatever is already
+overdue. `recentActions` shows `upkeep:feedRound`, `upkeep:usdgRound` and `upkeep:poolObservation` with
+the value written; the `feed.staleness`, `usdg.peg` and `pool.coverage` checks go green within one tick and
+stay there. Without a deposit in a vault the keeper still opens nothing (`cannot open this cycle`, reason
+`NO_ASSETS`), which is the correct idle state, not a fault: deposit any amount of the mock stock token into
+a vault and the next window opens an auction.
+
+**What a market maker sees on Monday 14:00 UTC.** With the demo up and a vault funded:
+
+1. Between 14:00:00 and 14:00:30 UTC (one tick) the keeper calls `openAuction` for each vault:
+   `AuctionOpened(vault, seriesId, WEEKDAY, …)` with `sRef` = the feed's latest walk value, the strike
+   gridded 800 bps (NVDA) or 300 bps (SPY) above it, `offeredQty` = the vault's whole balance, and a
+   reserve from the Black-Scholes floor at realised vol — realised on the walk itself, which is why the
+   walk has a non-zero σ. `currentAuction(vault)` returns the new seriesId; `auctions(seriesId).state` is 1.
+2. 14:00–14:15 UTC: `bid` is open to any address with an active MM bond (docs/mm-kit/BIDDING-GUIDE.md).
+   The public RPC and the explorer show every bid the moment it lands.
+3. 14:15:05 UTC: the keeper clears (`clearDelaySeconds` = 5). `AuctionCleared` with the uniform price;
+   allocations and refunds are pullable at once; bidders without a fill have their bond released.
+4. Friday 20:00 UTC (EDT) or 21:00 UTC (EST): `settle` on path 1 — the round the upkeep job posted at or
+   before expiry is the last valid round, inside 26 h. `claimPayout` and `OptionToken.claim` work from
+   that block; `releaseLocks` follows in the same tick.
+5. Friday expiry + 10 min: the weekend auction opens; Sunday 23:59 UTC it settles on path 2, the 60-min
+   TWAP the pool observations kept fresh, with the USDG/USD round inside its band.
+
+If an MM asks why the price moves in 4-hour steps with no news: that is the walk, and it is the point of
+the demo, not a bug. The band and the σ are in `config/keeper.46630.json` under `testnetUpkeep`.

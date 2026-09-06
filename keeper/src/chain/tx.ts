@@ -22,10 +22,30 @@ import { describeError, isRetryable, type DecodedRevert } from "./errors.js";
  */
 
 export type ContractKind =
-  "auctionHouse" | "settlementOracle" | "vault" | "feeRouter" | "riskModule";
+  | "auctionHouse"
+  | "settlementOracle"
+  | "vault"
+  | "feeRouter"
+  | "riskModule"
+  | "mockFeed"
+  | "mockPool";
+
+/**
+ * The 46630 mock externals, admitted only by `buildKeeperAllowTable` with `testnetUpkeep` on **and**
+ * the address book's chain id equal to 46630. On mainnet these addresses are real Chainlink proxies and
+ * real pools; neither has a `setRound` or a `write`, and the keeper must never try.
+ */
+const TESTNET_UPKEEP_CALLS: Record<"mockFeed" | "mockPool", readonly string[]> = {
+  mockFeed: ["setRound"],
+  mockPool: ["write"],
+};
+export const TESTNET_UPKEEP_CHAIN_ID = 46630;
 
 /** SPEC §3's keeper call graph, minus the things the keeper must never do. */
-const FULL_ROLE: Record<Exclude<ContractKind, "riskModule">, readonly string[]> = {
+const FULL_ROLE: Record<
+  Exclude<ContractKind, "riskModule" | "mockFeed" | "mockPool">,
+  readonly string[]
+> = {
   auctionHouse: ["openAuction", "clear", "releaseLocks"],
   settlementOracle: ["settle", "halt", "resolveHaltedByOracle"],
   vault: ["processDeposits", "processRedeems"],
@@ -55,7 +75,11 @@ export type AllowTable = ReadonlyMap<string, AllowEntry>;
 
 const key = (a: Address): string => a.toLowerCase();
 
-export function buildKeeperAllowTable(d: Deployment, role: "full" | "settle-only"): AllowTable {
+export function buildKeeperAllowTable(
+  d: Deployment,
+  role: "full" | "settle-only",
+  opts: { testnetUpkeep?: boolean } = {},
+): AllowTable {
   const table = new Map<string, AllowEntry>();
   const calls = role === "full" ? FULL_ROLE : SETTLE_ONLY_ROLE;
 
@@ -69,6 +93,21 @@ export function buildKeeperAllowTable(d: Deployment, role: "full" | "settle-only
   add(d.core.settlementOracle, "settlementOracle", "SettlementOracle");
   add(d.core.feeRouter, "feeRouter", "FeeRouter");
   for (const v of d.vaults) add(v.vault, "vault", `${v.symbol} vault`);
+
+  if (opts.testnetUpkeep) {
+    if (d.chainId !== TESTNET_UPKEEP_CHAIN_ID) {
+      throw new Error(
+        `testnet upkeep requested for chain ${d.chainId}; the mock allowlist exists only for ${TESTNET_UPKEEP_CHAIN_ID}`,
+      );
+    }
+    const mock = (address: Address, kind: "mockFeed" | "mockPool", label: string) =>
+      table.set(key(address), { kind, label, functions: new Set(TESTNET_UPKEEP_CALLS[kind]) });
+    mock(d.external.usdgUsdFeed, "mockFeed", "USDG/USD feed (mock)");
+    for (const v of d.vaults) {
+      mock(v.feed, "mockFeed", `${v.symbol} feed (mock)`);
+      mock(v.pool, "mockPool", `${v.symbol} pool (mock)`);
+    }
+  }
   return table;
 }
 

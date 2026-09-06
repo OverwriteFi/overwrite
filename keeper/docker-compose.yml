@@ -20,16 +20,72 @@
 # sharing one key interleave nonces on every permissionless call. The keeper refuses to start while
 # another instance is heartbeating on the same STATE_DIR — but they only see each other if they share
 # that directory, and here they would not. Pick one.
+#
+# The `testnet-demo` profile is the public 46630 demo: the same image and key, plus the mock upkeep job
+# (src/jobs/testnetUpkeep.ts) that posts feed rounds and pool observations so the deployment stays
+# settleable with nobody watching. Start it by *name* so the plain `keeper` service is not started next
+# to it:
+#   docker compose --env-file ../.env --profile testnet-demo up -d --build keeper-testnet-demo
+# Both services share the `keeper-state` volume on purpose: if both are ever up, the second one refuses
+# to start on the single-instance lock instead of interleaving nonces with the first.
+
+x-keeper: &keeper
+  build:
+    # The repo root, so the Dockerfile can copy contracts/deployments.
+    context: ..
+    dockerfile: keeper/Dockerfile
+  image: overwrite/keeper:latest
+  restart: unless-stopped
+  volumes:
+    - keeper-state:/app/state
+    - ../contracts/deployments:/app/deployments:ro
+  read_only: true
+  tmpfs:
+    # status.json is written atomically into its own directory on the state volume, never /tmp: a
+    # rename across filesystems fails EXDEV. /tmp is here only for anything Node itself wants.
+    - /tmp
+  security_opt:
+    - no-new-privileges:true
+  cap_drop:
+    - ALL
+  logging:
+    driver: json-file
+    options:
+      max-size: "10m"
+      max-file: "5"
 
 services:
+  keeper-testnet-demo:
+    <<: *keeper
+    container_name: overwrite-keeper-testnet-demo
+    profiles: ["testnet-demo"]
+    environment:
+      # Pinned, not interpolated: this profile exists for one chain. src/config.ts refuses
+      # TESTNET_UPKEEP on any other chain id, and src/chain/tx.ts refuses the mock allowlist too.
+      CHAIN_ID: "46630"
+      ROBINHOOD_TESTNET_RPC_URL: ${ROBINHOOD_TESTNET_RPC_URL:-https://rpc.testnet.chain.robinhood.com}
+      KEEPER_RPC_URL: ${KEEPER_RPC_URL:-}
+      # From the repo root .env via --env-file. On 46630 this is the one funded key (D-105), which
+      # also holds KEEPER_ROLE; the mocks have no owner, so it needs nothing else to write them.
+      KEEPER_PRIVATE_KEY: ${KEEPER_PRIVATE_KEY:-}
+      GUARDIAN_PRIVATE_KEY: ${GUARDIAN_PRIVATE_KEY:-}
+      GUARDIAN_AUTOPAUSE: ${GUARDIAN_AUTOPAUSE:-false}
+      TESTNET_UPKEEP: "true"
+      KEEPER_CONFIG: ${KEEPER_CONFIG:-}
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+      DRY_RUN: ${DRY_RUN:-false}
+      TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN:-}
+      TELEGRAM_CHAT_ID: ${TELEGRAM_CHAT_ID:-}
+      NODE_ENV: production
+      STATE_DIR: /app/state
+      STATUS_HOST: 0.0.0.0
+      STATUS_PORT: "8787"
+    ports:
+      - "127.0.0.1:8787:8787"
+
   keeper:
-    build:
-      # The repo root, so the Dockerfile can copy contracts/deployments.
-      context: ..
-      dockerfile: keeper/Dockerfile
-    image: overwrite/keeper:latest
+    <<: *keeper
     container_name: overwrite-keeper
-    restart: unless-stopped
     environment:
       # --- identity and chain ---
       CHAIN_ID: ${CHAIN_ID:-46630}
@@ -61,23 +117,6 @@ services:
     ports:
       # Host loopback only. Put a reverse proxy in front if the frontend needs /status.
       - "127.0.0.1:8787:8787"
-    volumes:
-      - keeper-state:/app/state
-      - ../contracts/deployments:/app/deployments:ro
-    read_only: true
-    tmpfs:
-      # status.json is written atomically into its own directory on the state volume, never /tmp: a
-      # rename across filesystems fails EXDEV. /tmp is here only for anything Node itself wants.
-      - /tmp
-    security_opt:
-      - no-new-privileges:true
-    cap_drop:
-      - ALL
-    logging:
-      driver: json-file
-      options:
-        max-size: "10m"
-        max-file: "5"
 
 volumes:
   keeper-state:
