@@ -1,22 +1,17 @@
 import type { PublicClient } from "viem";
-import { auctionHouseAbi, WEEKDAY, WEEKEND, kindName, type SeriesKind } from "./abi/index.js";
+import { auctionHouseAbi, WEEKDAY, kindName, type SeriesKind } from "./abi/index.js";
 import { chainNow } from "./chain/clients.js";
 import type { Sender } from "./chain/tx.js";
 import type { ResolvedConfig, VaultConfig } from "./config.js";
 import { clearAuction, flushFees, processQueues, releaseLocks } from "./jobs/clear.js";
-import { retryOpenKind } from "./jobs/clearWindow.js";
+import { retryOpenKind, scheduledOpenKind, weekendOpenAt } from "./jobs/clearWindow.js";
 import { openAuction, planOpen } from "./jobs/openAuction.js";
 import { resolveIfPossible, settleSeries } from "./jobs/settle.js";
 import type { Logger } from "./logger.js";
 import { readVault, type VaultSnapshot } from "./protocol.js";
 import type { StateDir } from "./state.js";
 import type { TestnetUpkeep } from "./jobs/testnetUpkeep.js";
-import {
-  AUCTION_DURATION,
-  describe,
-  inWeekdayOpenWindow,
-  inWeekendOpenWindow,
-} from "./time/epoch.js";
+import { AUCTION_DURATION, describe } from "./time/epoch.js";
 import { weekdayExpiryFor, weekendExpiryAt } from "./jobs/openAuction.js";
 
 /**
@@ -168,8 +163,21 @@ export class Scheduler {
         this.record({ at, vault: snapshot.symbol, action: "clear", outcome });
         if (willSkip && result.status !== "failed" && !settleOnly) {
           // REHEARSAL-1 S-1: a SKIPPED series hands the vault back IDLE. `canOpen` (D-046) accepts another
-          // open anywhere inside the same window, so re-open now instead of losing the week to one skip.
-          const kind = retryOpenKind(now, await this.tolerance());
+          // open anywhere inside the same window, so re-open now instead of losing the week to one skip —
+          // but only when there were bids to lose. An empty book re-opened is the same empty book.
+          const bids = await this.client.readContract({
+            address: deployment.core.auctionHouse,
+            abi: auctionHouseAbi,
+            functionName: "bids",
+            args: [snapshot.currentSeriesId],
+          });
+          const kind = retryOpenKind(now, await this.tolerance(), bids.length);
+          if (kind === null && bids.length === 0) {
+            this.log.info(
+              { vault: snapshot.symbol, seriesId: snapshot.currentSeriesId.toString() },
+              "skipped with an empty book; not re-opening this window",
+            );
+          }
           if (kind !== null) {
             const fresh = await readVault(
               this.client,
@@ -301,12 +309,16 @@ export class Scheduler {
     return { outcome, detail };
   }
 
-  /** Which opening window, if any, `now` sits in. Mirrors `AuctionHouse.canOpen`'s two branches. */
+  /**
+   * Which series the schedule says to open now, if any: Monday 14:00 UTC for WEEKDAY, weekday expiry
+   * + 600 s (or Friday close + 600 s in a week with no weekday series) for WEEKEND — each at or after
+   * its instant and at most `openTolerance` late, never early (jobs/clearWindow.ts).
+   */
   private async openKindDue(snapshot: VaultSnapshot, now: bigint): Promise<SeriesKind | null> {
     const tol = await this.tolerance();
-    if (inWeekdayOpenWindow(now, tol)) return WEEKDAY;
-    if (inWeekendOpenWindow(now, tol)) return WEEKEND;
-    return null;
+    const s = snapshot.series;
+    const lastWeekdayExpiry = s && s.kind === WEEKDAY ? s.expiry : null;
+    return scheduledOpenKind(now, tol, weekendOpenAt(now, lastWeekdayExpiry));
   }
 
   /** Queue processing, bond-lock release and fee flush. Each is permissionless and gated by simulate. */

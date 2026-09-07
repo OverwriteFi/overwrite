@@ -484,9 +484,9 @@ alerts only**.
 
 | When | Action |
 |---|---|
-| Monday 14:00 ± `openTolerance` | `openAuction(vault, WEEKDAY, fridayClose, distance, reserve)` |
+| Monday 14:00:00, or up to `openTolerance` late — never early | `openAuction(vault, WEEKDAY, fridayClose, distance, reserve)`. The contract accepts 14:00 ± `openTolerance`, but the early half is the contract's allowance, not the keeper's schedule: a keeper that opened at 12:00 would close the book before the 14:00 an MM set an alarm for |
 | Monday 14:15 → 15:15 | `clear` — **inside `[auctionClose, auctionClose + clearGrace)`**, 1 h by default (D-113 F-2). A later clear takes the skip path: every bid is refunded, the series is SKIPPED, the week's premium is gone. Auctions opened in one tick close a few seconds apart, so this is per vault, not one moment |
-| after a skip, same window | `openAuction` again — a SKIPPED series hands the vault back IDLE and `canOpen` (D-046) accepts another open inside the same window; the keeper re-opens at once (`openAuction KIND (retry after skip)`) |
+| after a skip, same window, **only if the skipped series had at least one bid** | `openAuction` again — a SKIPPED series hands the vault back IDLE and `canOpen` (D-046) accepts another open inside the same window; the keeper re-opens at once (`openAuction KIND (retry after skip)`) so the bidders a late clear refunded get a second chance. An empty book is not re-opened: a fresh series 15 minutes later has the same empty book, and on the 46630 demo that loop burnt 24 series ids in one Monday window. The week's series is skipped and the next open is the next scheduled one |
 | Friday close | `settle` — Chainlink at expiry (path 1), else the 30-min TWAP (path 2) |
 | Friday close + 10 min | `openAuction(vault, WEEKEND, Sunday 23:59, …)` |
 | Friday close + 25 min → +85 min | `clear`, same `clearGrace` rule |
@@ -642,7 +642,11 @@ a vault and the next window opens an auction.
 
 **What a market maker sees on Monday 14:00 UTC.** With the demo up and a vault funded:
 
-1. Between 14:00:00 and 14:00:30 UTC (one tick) the keeper calls `openAuction` for each vault:
+1. At 14:00:00 UTC, plus at most one tick (30 s), the keeper calls `openAuction` for each vault. It
+   never opens before 14:00 even though the contract would accept it from 12:00; the tolerance is for a
+   late keeper. If nobody bids, the 14:15 clear skips the series and **no second series is opened that
+   day**: the next open is Friday's weekend auction, 600 s after the Friday close (20:10 UTC under EDT,
+   21:10 under EST). Each open emits
    `AuctionOpened(vault, seriesId, WEEKDAY, …)` with `sRef` = the feed's latest walk value, the strike
    gridded 800 bps (NVDA) or 300 bps (SPY) above it, `offeredQty` = the vault's whole balance, and a
    reserve from the Black-Scholes floor at realised vol — realised on the walk itself, which is why the
