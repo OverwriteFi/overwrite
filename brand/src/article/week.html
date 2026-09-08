@@ -1,0 +1,41 @@
+<!doctype html><html lang="en"><head><meta charset="utf-8"><title>week</title>
+<link rel="stylesheet" href="../brand.css"><link rel="stylesheet" href="article.css">
+<style>
+h2{position:absolute;left:0;top:0}
+.sub{position:absolute;left:0;top:76px;font-size:22px;max-width:70ch}
+/* Timeline inset so the end labels stay inside the 96px margins. Odd stops annotate above the
+   rule, even stops below, so neighbouring labels never collide. */
+.tl{position:absolute;left:120px;right:120px;top:450px;height:6px}
+.seg{position:absolute;top:0;height:6px;background:var(--ink)}
+.seg.weekend{background:var(--blue)}
+.stop{position:absolute;top:-9px;width:24px;height:24px;background:var(--ink);transform:translateX(-12px);border-radius:3px}
+.stop.weekend{background:var(--blue)}
+.note{position:absolute;width:260px;transform:translateX(-50%);text-align:center}
+.note.above{bottom:34px}
+.note.below{top:40px}
+.note .t{display:block;font-weight:800;font-size:28px;letter-spacing:-0.02em;white-space:nowrap}
+.note .l{display:block;font-size:21px;font-weight:600;line-height:1.3;margin-top:4px}
+.note.below .t{order:2}
+.note.below{display:flex;flex-direction:column}
+.note.below .l{margin:0 0 4px}
+.key{position:absolute;left:0;bottom:0;font-size:20px;font-weight:600;display:flex;gap:28px;align-items:center}
+.key i{display:inline-block;width:40px;height:6px;vertical-align:middle;margin-right:10px}
+</style></head><body><div class="frame">
+<h2>One week, two auctions.</h2>
+<p class="sub">Weekday series expires at the Friday NYSE close. Weekend series expires Sunday 23:59 UTC. Premium is paid the moment each auction clears.</p>
+<div class="tl">
+  <div class="seg" style="left:0;width:58%"></div>
+  <div class="seg weekend" style="left:58%;width:42%"></div>
+  <div class="stop" style="left:0%"></div>
+  <div class="stop" style="left:20%"></div>
+  <div class="stop" style="left:58%"></div>
+  <div class="stop weekend" style="left:74%"></div>
+  <div class="stop weekend" style="left:100%"></div>
+  <div class="note above" style="left:0%"><span class="t">Mon 14:00 UTC</span><span class="l">Weekday auction opens</span></div>
+  <div class="note below" style="left:20%"><span class="t">+15 min</span><span class="l">Clears, premium paid</span></div>
+  <div class="note above" style="left:58%"><span class="t">Fri NY close</span><span class="l">Weekday settlement</span></div>
+  <div class="note below blue" style="left:74%"><span class="t">Fri +10 min</span><span class="l">Weekend auction</span></div>
+  <div class="note above blue" style="left:100%"><span class="t">Sun 23:59 UTC</span><span class="l">Weekend settlement</span></div>
+</div>
+<div class="key"><span><i style="background:var(--ink)"></i>Weekday series</span><span><i style="background:var(--blue)"></i>Weekend series, which no exchange can sell</span></div>
+</div></body></html>

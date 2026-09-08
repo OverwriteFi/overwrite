@@ -1,0 +1,8 @@
+/* Article frames: 1600x900, landing tokens, 96px margins. */
+body{width:1600px;height:900px;position:relative;font-size:22px;line-height:1.4}
+.frame{position:absolute;inset:96px}
+h1{font-size:72px;max-width:14ch}
+h2{margin:0;font-weight:800;letter-spacing:-0.03em;line-height:1;font-size:56px}
+.mark path{fill:none;stroke:var(--blue);stroke-width:14;stroke-linecap:round;stroke-linejoin:round}
+.blue{color:var(--blue)}
+.url{position:absolute;right:0;bottom:0;font-size:22px;font-weight:700;letter-spacing:-0.01em}

@@ -1,0 +1,34 @@
+<!doctype html><html lang="en"><head><meta charset="utf-8"><title>loop</title>
+<link rel="stylesheet" href="../brand.css"><link rel="stylesheet" href="article.css">
+<style>
+/* Same drawing as .stations/.ret on the landing, scaled for 1600 wide. */
+h2{position:absolute;left:0;top:0}
+.sub{position:absolute;left:0;top:76px;font-size:22px;max-width:60ch}
+.track{position:absolute;left:0;right:0;top:300px}
+.stations{list-style:none;margin:0;padding:0;display:grid;grid-template-columns:repeat(4,1fr)}
+.stations li{position:relative;padding:28px 40px 28px 0;border-top:2.5px solid var(--ink)}
+.stations li + li{padding-left:40px}
+.stations li + li::before{content:"";position:absolute;left:-1px;top:-2.5px;width:0;height:0;border-left:18px solid var(--blue);border-top:11px solid transparent;border-bottom:11px solid transparent;transform:translateY(-10px)}
+.k{display:block;font-size:20px;font-weight:600}
+.v{display:block;font-size:56px;font-weight:800;letter-spacing:-0.03em;color:var(--blue);line-height:1.1;margin-top:8px;font-variant-numeric:tabular-nums}
+.v small{font-size:22px;font-weight:600;color:var(--ink);letter-spacing:0}
+.stations p{margin-top:14px;font-size:19px;max-width:26ch;line-height:1.4}
+.stations p b{color:var(--blue)}
+.ret{height:64px;border:2.5px solid var(--blue);border-top:0;border-radius:0 0 12px 12px;position:relative;margin:10px 0 0}
+.ret::before{content:"";position:absolute;left:-11px;top:-6px;width:0;height:0;border-bottom:20px solid var(--blue);border-left:10px solid transparent;border-right:10px solid transparent}
+.ret-label{margin-top:22px;font-size:22px;text-align:center}
+.ret-label b{color:var(--blue)}
+</style></head><body><div class="frame">
+<h2>The WRITE loop</h2>
+<p class="sub">WRITE staked in the backstop sets vault capacity. Capacity writes premium. Fees paid in WRITE are burned and bonded. Demand is written into the contracts, not into a marketing plan.</p>
+<div class="track">
+<ol class="stations">
+  <li><span class="k">Backstop</span><span class="v">$10M <small>WRITE staked</small></span><p>The safety module that backstops every vault.</p></li>
+  <li><span class="k">Vault capacity</span><span class="v">$40M</span><p>Cap = k &times; backstop value. Depositors fill it with Stock Tokens.</p></li>
+  <li><span class="k">Premium written each week</span><span class="v">$120k</span><p>Market makers pay it in USDG, up front, twice a week.</p></li>
+  <li><span class="k">WRITE burned and bonded</span><span class="v">$18k <small>a week</small></span><p>Fees at a discount in WRITE, half burned. <b>$50k</b> bonded per market maker.</p></li>
+</ol>
+<div class="ret" aria-hidden="true"></div>
+<p class="ret-label">Burn and bonds tighten supply, staking grows the backstop, <b>and the loop starts again with more capacity.</b></p>
+</div>
+</div></body></html>

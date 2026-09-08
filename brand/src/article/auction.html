@@ -1,0 +1,29 @@
+<!doctype html><html lang="en"><head><meta charset="utf-8"><title>auction</title>
+<link rel="stylesheet" href="../brand.css"><link rel="stylesheet" href="article.css">
+<style>
+h2{position:absolute;left:0;top:0;max-width:18ch}
+.sub{position:absolute;left:0;top:140px;font-size:22px;max-width:36ch}
+.bids{position:absolute;left:720px;right:0;top:-10px;bottom:0}
+.bid{position:relative;height:64px;margin:34px 0 26px;display:flex;align-items:center}
+.bar{height:64px;border:3px solid var(--ink);border-radius:3px;box-sizing:border-box}
+.bid.filled .bar{background:var(--blue);border-color:var(--blue)}
+.who{position:absolute;left:0;top:-30px;font-size:19px;font-weight:600}
+.px{position:absolute;right:0;font-weight:800;font-size:30px;letter-spacing:-0.02em}
+.bid.filled .px{color:var(--blue)}
+.clear{position:relative;height:0;border-top:3px dashed var(--blue);margin:0 0 20px}
+.clear span{position:absolute;right:0;top:10px;font-size:20px;font-weight:700;color:var(--blue)}
+.esc{position:absolute;left:0;bottom:0;font-size:20px;font-weight:600;padding-top:14px;border-top:1.5px solid var(--ink);max-width:36ch}
+.esc b{color:var(--blue)}
+</style></head><body><div class="frame">
+<h2>Market makers compete for your upside</h2>
+<p class="sub">Bonded market makers bid a weekly premium for the vault&#39;s calls. The vault fills the highest bids first, and every winner pays the same clearing price.</p>
+<div class="bids">
+  <div class="bid filled"><span class="who">Market maker A</span><div class="bar" style="width:76%"></div><span class="px">0.62%</span></div>
+  <div class="bid filled"><span class="who">Market maker B</span><div class="bar" style="width:70%"></div><span class="px">0.58%</span></div>
+  <div class="bid filled"><span class="who">Market maker C</span><div class="bar" style="width:64%"></div><span class="px">0.55%</span></div>
+  <div class="clear"><span>Uniform clearing price: 0.55%</span></div>
+  <div class="bid"><span class="who">Market maker D, not filled</span><div class="bar" style="width:52%"></div><span class="px">0.47%</span></div>
+  <div class="bid"><span class="who">Market maker E, not filled</span><div class="bar" style="width:40%"></div><span class="px">0.39%</span></div>
+</div>
+<p class="esc"><b>Escrowed before clear.</b> Premium sits in the auction contract with each bid, so the vault is paid in USDG the moment it clears.</p>
+</div></body></html>

@@ -13,6 +13,7 @@ const jobs = [
   { file: "profile.html", w: 800, h: 800, png: "profile-dark.png", bodyClass: "dark" },
   { file: "banner.html", w: 1500, h: 500, png: "banner.png" },
   { file: "favicon.html", w: 512, h: 512, png: "favicon.png", transparent: true },
+  ...["cover", "week", "auction", "loop"].map((n) => ({ file: "article/" + n + ".html", w: 1600, h: 900, png: "article/" + n + ".png" })),
 ];
 
 const browser = await chromium.launch({ channel: "chrome" });
