@@ -5,5 +5,7 @@
 html,body{margin:0;padding:0}
 body{background:var(--bg);color:var(--ink);font-family:var(--font-sans);-webkit-font-smoothing:antialiased;overflow:hidden}
 h1{margin:0;font-weight:800;letter-spacing:-0.03em;line-height:1}
-/* .mark i on the landing is a 14px square with 2px radius; the ratio is kept when scaled. */
-.mark{display:block;background:var(--blue);border-radius:calc(var(--size) * 2 / 14)}
+/* The mark: covered-call payoff glyph. 100-unit box, stroke 14 (14% of the box), round caps,
+   45° rise then flat at the cap. Same path as favicon.svg and components/site/Mark.tsx. */
+.mark{display:block;width:var(--size);height:var(--size)}
+.mark path{fill:none;stroke:var(--blue);stroke-width:14;stroke-linecap:round;stroke-linejoin:round}

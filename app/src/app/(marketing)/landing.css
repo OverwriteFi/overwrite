@@ -9,7 +9,7 @@
 .landing :focus-visible{outline:3px solid var(--blue);outline-offset:3px}
 .landing .nav{display:flex;align-items:center;justify-content:space-between;padding:20px 0;border-bottom:1px solid var(--ink)}
 .landing .mark{text-decoration:none;font-weight:800;font-size:21px;letter-spacing:-0.03em;display:flex;align-items:center;gap:10px}
-.landing .mark i{display:inline-block;width:14px;height:14px;background:var(--blue);border-radius:2px}
+.landing .mark svg{display:block;width:18px;height:18px;flex:none}
 .landing .nav ul{list-style:none;margin:0;padding:0;display:flex;gap:26px;align-items:center}
 .landing .nav li a{text-decoration:none;font-size:15px;color:var(--gray)}
 .landing .nav li a:hover{color:var(--ink)}

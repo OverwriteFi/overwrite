@@ -15,6 +15,7 @@ export const metadata: Metadata = {
     default: "Overwrite — Make your Stock Tokens pay you every week",
     template: "%s — Overwrite",
   },
+  icons: { icon: [{ url: "/favicon.svg", type: "image/svg+xml" }, { url: "/favicon.png", type: "image/png", sizes: "512x512" }] },
   description:
     "Overwrite is the yield layer for tokenized stocks on Robinhood Chain. Market makers bid for your upside every week and pay premium in USDG up front. Two auctions a week, including the weekend.",
 };

@@ -5,13 +5,9 @@
    vertical margins keep the composition clear of X's responsive crop. */
 body{width:1500px;height:500px;position:relative}
 h1{position:absolute;left:80px;top:118px;width:800px;font-size:62px}
-.payoff{position:absolute;left:940px;top:90px;width:480px;height:320px;display:block}
-.payoff path{stroke:var(--blue);stroke-width:7;fill:none;stroke-linecap:round;stroke-linejoin:round}
+.mark{--size:320px;position:absolute;left:1020px;top:90px}
 </style></head>
 <body>
 <h1>Make your Stock Tokens pay you every week.</h1>
-<!-- Covered-call payoff: rises at 45° (equal dx/dy) then flat past the cap. -->
-<svg class="payoff" viewBox="0 0 480 320" aria-label="Covered-call payoff line">
-  <path d="M 20 300 L 260 60 L 460 60"/>
-</svg>
+<svg class="mark" viewBox="0 0 100 100" aria-label="Overwrite mark"><path d="M12 69 L50 31 L88 31" fill="none" stroke="#2A3BFF" stroke-width="14" stroke-linecap="round" stroke-linejoin="round"/></svg>
 </body></html>

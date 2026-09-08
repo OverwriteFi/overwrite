@@ -1,4 +1,5 @@
 import Link from "next/link";
+import { Mark } from "./Mark";
 import { WalletButton } from "@/components/wallet/WalletButton";
 import { NavLinks } from "./NavLinks";
 
@@ -15,7 +16,7 @@ export function Header() {
           href="/vaults"
           className="flex items-center gap-[10px] no-underline font-extrabold text-[21px] tracking-[-0.03em]"
         >
-          <i aria-hidden className="inline-block w-[14px] h-[14px] bg-blue rounded-[2px]" />
+          <Mark className="w-[18px] h-[18px] shrink-0" />
           Overwrite
         </Link>
         <div className="flex items-center gap-4 sm:gap-7 order-3 sm:order-2 w-full sm:w-auto pt-3 sm:pt-0 border-t sm:border-t-0 border-rule">

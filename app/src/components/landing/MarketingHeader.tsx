@@ -1,4 +1,5 @@
 import Link from "next/link";
+import { Mark } from "@/components/site/Mark";
 
 /** The landing nav, verbatim from landing/index.html. Anchors scroll the page; "Open app" leaves it. */
 export function MarketingHeader() {
@@ -6,7 +7,7 @@ export function MarketingHeader() {
     <header className="wrap">
       <nav className="nav" aria-label="Main">
         <Link className="mark" href="/">
-          <i aria-hidden="true" />
+          <Mark />
           Overwrite
         </Link>
         <ul>

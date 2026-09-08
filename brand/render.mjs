@@ -12,6 +12,7 @@ const jobs = [
   { file: "profile.html", w: 800, h: 800, png: "profile.png" },
   { file: "profile.html", w: 800, h: 800, png: "profile-dark.png", bodyClass: "dark" },
   { file: "banner.html", w: 1500, h: 500, png: "banner.png" },
+  { file: "favicon.html", w: 512, h: 512, png: "favicon.png", transparent: true },
 ];
 
 const browser = await chromium.launch({ channel: "chrome" });
@@ -23,7 +24,7 @@ try {
     await page.evaluate(() => document.fonts.load('800 62px "Schibsted Grotesk"').then(() => document.fonts.ready));
     const fonts = await page.evaluate(() => document.fonts.check('800 62px "Schibsted Grotesk"'));
     if (!fonts) throw new Error(`Schibsted Grotesk did not load for ${j.file}`);
-    await page.screenshot({ path: out(j.png), type: "png", omitBackground: false, clip: { x: 0, y: 0, width: j.w, height: j.h } });
+    await page.screenshot({ path: out(j.png), type: "png", omitBackground: !!j.transparent, clip: { x: 0, y: 0, width: j.w, height: j.h } });
     console.log("wrote", j.png);
     await page.close();
   }
