@@ -1,7 +1,9 @@
 /* Ported verbatim from landing/index.html; every rule scoped under .landing so the app's own
    components keep their styles. Values are the landing's, unchanged. */
 .landing{--bg:#FFFFFF; --bg-2:#F1F2EE; --ink:#000000; --gray:#62676F; --rule:#D9DBDF; --blue:#2A3BFF; --blue-dark:#1B27B8; --blue-tint:#E8EAFF; --max:1200px; --gutter:24px;}
-.landing{margin:0;background:var(--bg);color:var(--ink); font-family:var(--font-sans); font-size:17px;line-height:1.5;-webkit-font-smoothing:antialiased; font-variant-numeric:tabular-nums;overflow-x:clip;}
+.landing{margin:0;background:var(--bg);color:var(--ink); font-family:var(--font-sans); font-size:17px;line-height:1.5;-webkit-font-smoothing:antialiased;overflow-x:clip;}
+/* Figures line up; prose keeps proportional punctuation (tnum widens . and , in this face). */
+.landing .out .v, .landing .out .last, .landing .field .val, .landing .field input, .landing .ctl .val, .landing .ctl .ticks, .landing .stations .v, .landing .series td, .landing .ledger td, .landing .chart text{font-variant-numeric:tabular-nums}
 .landing a{color:inherit}
 .landing h1, .landing h2, .landing h3{margin:0;font-weight:800;letter-spacing:-0.03em;line-height:1}
 .landing p{margin:0}
@@ -22,13 +24,13 @@
 @media (max-width:720px){
 .landing .nav ul li:not(:last-child){display:none}
 }
-.landing .hero{display:grid;grid-template-columns:minmax(0,1.05fr) minmax(0,1fr);gap:56px;padding:64px 0 72px;align-items:start}
+.landing .hero{display:grid;grid-template-columns:minmax(0,1.05fr) minmax(0,1fr);gap:56px;padding-top:64px;padding-bottom:72px;align-items:start}
 .landing .hero h1{font-size:clamp(40px,5.2vw,72px);max-width:13ch}
 .landing .hero .lede{margin-top:24px;font-size:clamp(17px,1.35vw,19px);max-width:46ch;color:var(--ink)}
 .landing .hero .cta{margin-top:28px;display:flex;gap:12px;align-items:center;flex-wrap:wrap}
 .landing .hero .doc{font-size:15px;color:var(--gray);text-decoration:underline;text-underline-offset:4px}
 @media (max-width:900px){
-.landing .hero{grid-template-columns:1fr;gap:36px;padding:44px 0 56px}
+.landing .hero{grid-template-columns:1fr;gap:36px;padding-top:44px;padding-bottom:56px}
 }
 .landing .calc{border:1.5px solid var(--ink);border-radius:4px;padding:22px 22px 18px;background:#fff}
 .landing .calc-head{display:flex;justify-content:space-between;align-items:baseline;gap:16px;flex-wrap:wrap}
@@ -60,7 +62,7 @@
 .landing .out{grid-template-columns:1fr 1fr}
 .landing .calc{padding:16px}
 }
-.landing .sec{padding:88px 0 0}
+.landing .sec{padding-top:88px}
 .landing .sec h2{font-size:clamp(30px,3.6vw,48px);max-width:22ch}
 .landing .sec .sub{margin-top:14px;max-width:58ch;color:var(--gray)}
 .landing .band{background:var(--bg-2);margin-top:88px;padding:72px 0}
