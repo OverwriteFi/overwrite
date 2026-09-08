@@ -22,9 +22,9 @@ Fifteen minutes, twice a week. Monday 14:00 UTC, and again ten minutes after Fri
 
 To bid you post a 25,000 USDG bond. It is locked while you hold a live series, withdrawable after a 7-day cooldown, and slashable only through a 48-hour public timelock with published grounds. No admin key touches it.
 
-The contracts are live on the Robinhood Chain testnet today: two vaults, NVDA and SPY, real auction code, mock tokens. I have a kit that gets a desk from zero to a filled bid in about ten minutes: a one-page mechanics note, a bidding guide with the exact transactions, a small viem SDK, and the bond FAQ. [link to docs/mm-kit]
+The contracts are live on the Robinhood Chain testnet today: two vaults, NVDA and SPY, real auction code, mock tokens. I have a kit that gets a desk from zero to a filled bid in about ten minutes: a one-page mechanics note, a bidding guide with the exact transactions, a small viem SDK, and the bond FAQ. https://github.com/OverwriteFi/overwrite/tree/master/docs/mm-kit
 
-Mainnet follows the audit. The first vaults open with fixed caps, so the early bidders are bidding into thin books with a floor set from realised vol. That does not last.
+Mainnet is next; the first vaults open with fixed caps, so the early bidders are bidding into thin books with a floor set from realised vol. That does not last.
 
 Would a 30-minute walkthrough next week suit? I can also send testnet gas to any address you name.
 
