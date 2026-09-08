@@ -1,0 +1,7 @@
+{
+  "name": "overwrite-brand",
+  "private": true,
+  "description": "X brand assets rendered from HTML with the landing's tokens",
+  "scripts": { "render": "node render.mjs" },
+  "devDependencies": { "playwright-core": "^1.55.0" }
+}

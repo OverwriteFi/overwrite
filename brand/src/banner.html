@@ -1,0 +1,17 @@
+<!doctype html><html lang="en"><head><meta charset="utf-8"><title>banner</title>
+<link rel="stylesheet" href="brand.css">
+<style>
+/* 1500x500. Bottom-left 420x260 is left empty for the X profile overlap; 80px side / 90px
+   vertical margins keep the composition clear of X's responsive crop. */
+body{width:1500px;height:500px;position:relative}
+h1{position:absolute;left:80px;top:118px;width:800px;font-size:62px}
+.payoff{position:absolute;left:940px;top:90px;width:480px;height:320px;display:block}
+.payoff path{stroke:var(--blue);stroke-width:7;fill:none;stroke-linecap:round;stroke-linejoin:round}
+</style></head>
+<body>
+<h1>Make your Stock Tokens pay you every week.</h1>
+<!-- Covered-call payoff: rises at 45° (equal dx/dy) then flat past the cap. -->
+<svg class="payoff" viewBox="0 0 480 320" aria-label="Covered-call payoff line">
+  <path d="M 20 300 L 260 60 L 460 60"/>
+</svg>
+</body></html>
